@@ -7,10 +7,11 @@ tests, coverage, logs and traces, not by another model's opinion.
 ```
 🟡 AI change confidence: 75/100 (Medium)
 
-| Signal | Impact | Evidence                                                    |
-| Logs   | −15    | 4 new ERROR log(s) across 1 signature, even though tests pass |
-| Traces | −10    | 4 new exception(s) recorded on spans                         |
-| ✓      | 0      | All 15 tests pass                                            |
+| Signal | Impact | Evidence                                                  |
+| Logs   | −15    | 2 new ERROR logs, a sign of errors being caught and hidden |
+| Traces | −10    | 2 new exceptions recorded on spans                        |
+| ✓      | 0      | All 16 tests pass                                         |
+| ✓      | 0      | All 11 changed code lines run under tests                 |
 ```
 
 ## Why this exists
