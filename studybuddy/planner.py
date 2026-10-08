@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-from .telemetry import log, tracer
+from .telemetry import tracer
 
 
 def build_study_plan(
@@ -21,12 +21,13 @@ def build_study_plan(
     with tracer.start_as_current_span("planner.build") as span:
         span.set_attribute("planner.topics", len(topics))
         span.set_attribute("planner.days", days)
-        if not topics:
-            log.warning("empty study plan requested")
-            return [{} for _ in range(days)]
-        total_weight = sum(max(1, min(5, d)) for _, d in topics)
+        total_weight = sum(d for _, d in topics)
         day_plan: Dict[str, int] = {}
         for name, difficulty in topics:
-            weight = max(1, min(5, difficulty))
-            day_plan[name] = round(minutes_per_day * weight / total_weight)
+            day_plan[name] = minutes_per_day * difficulty // total_weight
+        # Give the minutes lost to rounding down to the hardest topic so each
+        # day adds up to exactly minutes_per_day.
+        leftover = minutes_per_day - sum(day_plan.values())
+        hardest = max(topics, key=lambda t: t[1])[0]
+        day_plan[hardest] += leftover
         return [dict(day_plan) for _ in range(days)]
