@@ -40,6 +40,8 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     details = []
     if signals.tests_newly_failing:
         details += ["**Newly failing tests**", *[f"- `{t}`" for t in signals.tests_newly_failing], ""]
+    if signals.tests_removed:
+        details += ["**Tests removed by this change**", *[f"- `{t}`" for t in signals.tests_removed], ""]
     if signals.uncovered_changes:
         details += ["**Changed lines no test executes**",
                     *[f"- `{p}` lines {_lines(l)}" for p, l in signals.uncovered_changes.items()], ""]

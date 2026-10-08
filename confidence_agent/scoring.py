@@ -58,7 +58,7 @@ def score(s: Signals) -> Score:
     if s.new_error_logs:
         pts = _tiered(len(s.new_error_logs), 15, 5, 20)
         total = sum(s.new_error_logs.values())
-        deductions.append(("Logs", pts, f"{total} new ERROR log(s) across {len(s.new_error_logs)} signature(s), even though tests may pass"))
+        deductions.append(("Logs", pts, f"{total} new ERROR log(s) across {len(s.new_error_logs)} signature(s), a sign of errors being caught and hidden"))
     else:
         passed.append("No new ERROR logs")
     if s.otel_enabled:
