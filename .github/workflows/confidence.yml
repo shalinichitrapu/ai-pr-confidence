@@ -1,0 +1,37 @@
+name: AI change confidence
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the agent needs the base branch history
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      # GitHub's runners can't reach the model on your home desktop, so CI posts
+      # the score without the plain-English summary. Run scripts/score_pr.sh on
+      # your Mac to post the same comment with the local model's summary.
+      - name: Score this pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -m confidence_agent \
+            --base origin/${{ github.base_ref }} \
+            --head ${{ github.event.pull_request.head.sha }} \
+            --source studybuddy \
+            --no-llm \
+            --post-to-pr ${{ github.event.pull_request.number }}
