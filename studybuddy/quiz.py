@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from opentelemetry import trace
+
 from .telemetry import log, tracer
 
 
@@ -21,6 +23,20 @@ class QuizResult:
         return round(100.0 * self.correct / self.total, 1)
 
 
+def _normalize(value: Any) -> Any:
+    """Trim whitespace and ignore case so 'Paris ' matches 'paris'."""
+    return value.strip().lower()
+
+
+def _matches(answer: Any, expected: Any) -> bool:
+    try:
+        return _normalize(answer) == _normalize(expected)
+    except Exception as exc:  # keep grading even if one answer is odd
+        trace.get_current_span().record_exception(exc)
+        log.error("could not normalize answer %r", answer, exc_info=True)
+        return answer == expected
+
+
 def grade_quiz(answers: Dict[str, Any], key: Dict[str, Any]) -> QuizResult:
     """Grade a student's answers against an answer key.
 
@@ -32,7 +48,7 @@ def grade_quiz(answers: Dict[str, Any], key: Dict[str, Any]) -> QuizResult:
         correct = 0
         missed: List[str] = []
         for question, expected in key.items():
-            if question in answers and answers[question] == expected:
+            if question in answers and _matches(answers[question], expected):
                 correct += 1
             else:
                 missed.append(question)

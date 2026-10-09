@@ -29,3 +29,8 @@ def test_unknown_questions_are_ignored():
 
 def test_empty_quiz():
     assert grade_quiz({}, {}).percent == 0.0
+
+
+def test_answers_ignore_case_and_whitespace():
+    result = grade_quiz({"q1": "  Paris ", "q2": "MITOSIS"}, {"q1": "paris", "q2": "mitosis"})
+    assert result.correct == 2
