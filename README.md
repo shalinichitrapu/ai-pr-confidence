@@ -75,6 +75,7 @@ confidence-agent --base main --head my-branch --source my_package --no-llm
 - `--base`: the branch the change is going into.
 - `--head`: the branch (or commit) with the change. Defaults to your current checkout.
 - `--source`: the folder whose coverage you care about, usually your package.
+  Changed files outside it (e.g. `setup.py` or scripts) aren't checked for coverage.
 - `--tests`: your test folder, if it isn't `tests`.
 
 The report is written to `confidence-report/report.md`, with the raw numbers in
