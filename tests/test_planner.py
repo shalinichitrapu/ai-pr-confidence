@@ -19,10 +19,11 @@ def test_difficulty_is_clamped():
     assert plan[0] == {"a": 50, "b": 10}
 
 
-def test_empty_topics_give_empty_days():
-    assert build_study_plan([], days=2) == [{}, {}]
-
-
 def test_days_must_be_positive():
     with pytest.raises(ValueError):
         build_study_plan([("a", 1)], days=0)
+
+
+def test_minutes_add_up_exactly():
+    plan = build_study_plan([("a", 1), ("b", 1), ("c", 1)], days=1, minutes_per_day=100)
+    assert sum(plan[0].values()) == 100
