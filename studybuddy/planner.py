@@ -32,10 +32,14 @@ def build_study_plan(
             log.warning("empty study plan requested")
             return [{} for _ in range(days)]
         total_weight = sum(max(1, min(5, d)) for _, d in topics)
-        day_plan: Dict[str, int] = {}
-        for name, difficulty in topics:
-            weight = max(1, min(5, difficulty))
-            day_plan[name] = round(minutes_per_day * weight / total_weight)
-            allocations.add(1)
-            minutes_per_topic.record(day_plan[name])
-        return [dict(day_plan) for _ in range(days)]
+        plan: List[Dict[str, int]] = []
+        # Build each day separately so per-day adjustments can be added later.
+        for _ in range(days):
+            day_plan: Dict[str, int] = {}
+            for name, difficulty in topics:
+                weight = max(1, min(5, difficulty))
+                day_plan[name] = round(minutes_per_day * weight / total_weight)
+                allocations.add(1)
+                minutes_per_topic.record(day_plan[name])
+            plan.append(day_plan)
+        return plan
