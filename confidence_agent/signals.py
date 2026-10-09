@@ -52,6 +52,18 @@ def _is_test_file(path: str, tests_path: str) -> bool:
     return path.startswith(tests_path.rstrip("/") + "/") or name.startswith("test_") or name == "conftest.py"
 
 
+def _in_source(path: str, source: str) -> bool:
+    """True if `path` is inside the --source folder or package coverage measured."""
+    src = source.strip().rstrip("/")
+    if src.startswith("./"):
+        src = src[2:]
+    if src in ("", "."):
+        return True
+    if "/" not in src:
+        src = src.replace(".", "/")  # dotted package name, e.g. my.pkg
+    return path == src or path.startswith(src + "/")
+
+
 def _error_log_signatures(run: RunResult) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for rec in run.logs:
@@ -79,7 +91,7 @@ def _median_durations(run: RunResult) -> Dict[str, float]:
     return {name: statistics.median(v) for name, v in by_name.items()}
 
 
-def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str) -> Signals:
+def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, source: str = ".") -> Signals:
     s = Signals(otel_enabled=head.otel_enabled)
 
     s.tests_total = len(head.tests)
@@ -91,6 +103,9 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str) -> Si
 
     for path, added in diff.added_lines.items():
         if not path.endswith(".py") or _is_test_file(path, tests_path):
+            continue
+        if not _in_source(path, source):
+            # Coverage was never measured here, so it can't say whether tests run it.
             continue
         cov = head.coverage.get(path)
         if cov is None:
