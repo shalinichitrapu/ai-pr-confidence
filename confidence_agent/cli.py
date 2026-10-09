@@ -17,7 +17,7 @@ from . import gitutil, llm, report, runner, scoring, signals
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        prog="confidence_agent",
+        prog="confidence-agent",
         description="Score how much to trust an (AI-generated) change using tests, coverage, logs and traces.",
     )
     p.add_argument("--repo", default=".", help="path to the git repository (default: .)")
