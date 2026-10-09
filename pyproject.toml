@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-pr-confidence"
+version = "0.1.0"
+description = "Score how much to trust an (AI-generated) change using tests, coverage, logs and traces."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "pytest>=7",
+    "coverage>=7",
+]
+
+[project.urls]
+Homepage = "https://github.com/shalinichitrapu/ai-pr-confidence"
+
+[project.scripts]
+confidence-agent = "confidence_agent.cli:main"
+
+[tool.setuptools]
+packages = ["confidence_agent"]
