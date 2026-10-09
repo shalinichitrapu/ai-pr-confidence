@@ -75,7 +75,26 @@ def score(s: Signals) -> Score:
         else:
             passed.append("No latency regressions in traced operations")
 
-    # 4. Reviewability
+    # 4. Metrics and memory, compared within the same test
+    if s.metrics_enabled:
+        flagged = len(s.metric_regressions) + len(s.new_error_metrics)
+        if flagged:
+            parts = []
+            if s.metric_regressions:
+                parts.append(f"{len(s.metric_regressions)} metric(s) at least doubled in the same test")
+            if s.new_error_metrics:
+                parts.append(f"{len(s.new_error_metrics)} new error counter(s)")
+            deductions.append(("Metrics", _tiered(flagged, 10, 5, 20), "; ".join(parts)))
+        else:
+            passed.append("No unusual changes in app metrics")
+    if s.memory_enabled:
+        if s.memory_regressions:
+            pts = min(20, 10 * len(s.memory_regressions))
+            deductions.append(("Memory", pts, f"{len(s.memory_regressions)} test(s) use at least 2× more peak memory"))
+        else:
+            passed.append("No memory growth in tests")
+
+    # 5. Reviewability
     if s.diff_lines > LARGE_DIFF_LINES:
         deductions.append(("Size", 5, f"Large change ({s.diff_lines} lines) is harder to review"))
 

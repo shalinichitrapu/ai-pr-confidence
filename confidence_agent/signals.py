@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List, Tuple
 
 from .gitutil import Diff
 from .runner import RunResult
@@ -13,6 +14,17 @@ from .runner import RunResult
 # so tiny timing noise in fast functions does not count.
 LATENCY_RATIO = 2.0
 LATENCY_MIN_DELTA_MS = 5.0
+
+# Metric values from the same test with the same inputs should not move much.
+# Flag a series only if it at least doubled and grew by a real amount.
+METRIC_RATIO = 2.0
+METRIC_MIN_DELTA = 3.0
+# Names or attribute values that mark a counter as counting failures.
+ERROR_LIKE = re.compile(r"error|fail|invalid|exception|retry|timeout|reject", re.IGNORECASE)
+
+# A test's peak memory must both double and grow by at least this much.
+MEMORY_RATIO = 2.0
+MEMORY_MIN_DELTA_BYTES = 5 * 1024 * 1024
 
 
 @dataclass
@@ -30,10 +42,16 @@ class Signals:
     new_error_logs: Dict[str, int] = field(default_factory=dict)  # signature -> count
     new_span_exceptions: Dict[str, int] = field(default_factory=dict)
     latency_regressions: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # series -> {"test", "kind", "before", "after"} for the test where it grew most
+    metric_regressions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    new_error_metrics: Dict[str, float] = field(default_factory=dict)  # series -> total in head
+    memory_regressions: Dict[str, Dict[str, float]] = field(default_factory=dict)  # test -> MB before/after
 
     diff_lines: int = 0
     files_changed: List[str] = field(default_factory=list)
     otel_enabled: bool = False
+    metrics_enabled: bool = False
+    memory_enabled: bool = False
 
     @property
     def changed_line_coverage(self) -> float:
@@ -82,6 +100,35 @@ def _span_exception_signatures(run: RunResult) -> Dict[str, int]:
                 sig = f"{span['name']}: {ev['exc_type']}"
                 counts[sig] = counts.get(sig, 0) + 1
     return counts
+
+
+def _series(point: Dict[str, Any]) -> str:
+    attrs = ",".join(f"{k}={v}" for k, v in sorted(point["attributes"].items()))
+    return f"{point['name']}{{{attrs}}}" if attrs else point["name"]
+
+
+def _metric_values(run: RunResult) -> Dict[Tuple[str, str], Tuple[str, float]]:
+    """(test, series) -> (kind, value) where value is what one test recorded.
+
+    Counters and up-down counters: the amount added during the test.
+    Gauges: the last value set. Histograms: the mean of recorded values.
+    """
+    out: Dict[Tuple[str, str], Tuple[str, float]] = {}
+    hist: Dict[Tuple[str, str], List[float]] = {}
+    for p in run.metrics:
+        key = (p["test"], _series(p))
+        if p["kind"] == "histogram":
+            c, s = hist.get(key, [0, 0.0])
+            hist[key] = [c + p["count"], s + p["sum"]]
+        elif p["kind"] == "gauge":
+            out[key] = ("gauge", p["value"])
+        else:
+            prev = out.get(key, (p["kind"], 0))[1]
+            out[key] = (p["kind"], prev + p["value"])
+    for key, (count, total) in hist.items():
+        if count:
+            out[key] = ("histogram mean", total / count)
+    return out
 
 
 def _median_durations(run: RunResult) -> Dict[str, float]:
@@ -134,6 +181,34 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             continue
         if after >= before * LATENCY_RATIO and after - before >= LATENCY_MIN_DELTA_MS:
             s.latency_regressions[name] = {"before_ms": round(before, 2), "after_ms": round(after, 2)}
+
+    # Metrics: compare each series within the same test, which ran the same inputs.
+    s.metrics_enabled = head.otel_metrics_enabled and bool(base.metrics or head.metrics)
+    base_m, head_m = _metric_values(base), _metric_values(head)
+    shared_tests = set(base.node_ids) & set(head.node_ids)
+    for (test, series), (kind, after) in head_m.items():
+        if test not in shared_tests:
+            continue
+        before = base_m.get((test, series), (kind, None))[1]
+        if before is None:
+            if kind == "counter" and after > 0 and ERROR_LIKE.search(series):
+                s.new_error_metrics[series] = s.new_error_metrics.get(series, 0) + after
+            continue
+        growth = after - before
+        if after >= before * METRIC_RATIO and growth >= METRIC_MIN_DELTA:
+            worst = s.metric_regressions.get(series)
+            if worst is None or growth > worst["after"] - worst["before"]:
+                s.metric_regressions[series] = {"test": test, "kind": kind, "before": before, "after": after}
+
+    s.memory_enabled = bool(base.memory and head.memory)
+    for test, after in head.memory.items():
+        before = base.memory.get(test)
+        if before is None:
+            continue
+        if after >= before * MEMORY_RATIO and after - before >= MEMORY_MIN_DELTA_BYTES:
+            s.memory_regressions[test] = {
+                "before_mb": round(before / 2**20, 1), "after_mb": round(after / 2**20, 1)
+            }
 
     s.diff_lines = diff.size
     s.files_changed = diff.files_changed

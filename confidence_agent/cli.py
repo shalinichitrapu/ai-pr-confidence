@@ -26,6 +26,8 @@ def parse_args(argv=None):
     p.add_argument("--source", default=".", help="package/folder to measure coverage for; changed files outside it are not coverage-checked")
     p.add_argument("--tests", default="tests", help="test folder (default: tests)")
     p.add_argument("--out", default="confidence-report", help="folder for report.md and result.json")
+    p.add_argument("--no-memory", action="store_true",
+                   help="skip per-test peak memory measurement (tracemalloc slows tests down)")
     p.add_argument("--no-llm", action="store_true", help="skip the plain-English summary")
     p.add_argument("--llm-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     p.add_argument("--llm-model", default=os.environ.get("OLLAMA_MODEL", "qwen2.5:3b"))
@@ -53,7 +55,7 @@ def main(argv=None) -> int:
             wt = tmp / label
             gitutil.add_worktree(repo, sha, wt)
             print(f"[confidence] running tests on {label}...")
-            runs[label] = runner.run_tests(wt, label, args.source, args.tests)
+            runs[label] = runner.run_tests(wt, label, args.source, args.tests, track_memory=not args.no_memory)
             gitutil.remove_worktree(repo, wt)
     finally:
         for label in ("base", "head"):
