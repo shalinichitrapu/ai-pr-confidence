@@ -24,7 +24,11 @@ class RunResult:
     coverage: Dict[str, Any] = field(default_factory=dict)  # coverage.py JSON "files"
     spans: List[Dict[str, Any]] = field(default_factory=list)
     logs: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)  # OTel metric points, tagged by test
+    memory: Dict[str, int] = field(default_factory=dict)  # test id -> peak bytes allocated
+    node_ids: List[str] = field(default_factory=list)  # pytest ids that metrics and memory use
     otel_enabled: bool = False
+    otel_metrics_enabled: bool = False
     exit_code: int = 0
     output_tail: str = ""
 
@@ -56,7 +60,7 @@ def _parse_junit(path: Path) -> tuple:
     return tests, durations
 
 
-def run_tests(workdir: Path, label: str, source: str, tests_path: str) -> RunResult:
+def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_memory: bool = True) -> RunResult:
     scratch = Path(tempfile.mkdtemp(prefix=f"confidence-{label}-"))
     plugin_dir = _plugin_dir()
     junit = scratch / "junit.xml"
@@ -69,6 +73,7 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str) -> RunRes
     )
     env["CONFIDENCE_TELEMETRY_OUT"] = str(telemetry)
     env["COVERAGE_FILE"] = str(scratch / ".coverage")
+    env["CONFIDENCE_MEMORY"] = "1" if track_memory else "0"
     env.pop("PYTEST_ADDOPTS", None)
 
     cmd = [
@@ -90,7 +95,10 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str) -> RunRes
     if telemetry.exists():
         data = json.loads(telemetry.read_text())
         result.spans, result.logs = data["spans"], data["logs"]
+        result.metrics, result.memory = data.get("metrics", []), data.get("memory", {})
+        result.node_ids = data.get("test_ids", [])
         result.otel_enabled = data.get("otel", False)
+        result.otel_metrics_enabled = data.get("otel_metrics", False)
 
     shutil.rmtree(plugin_dir, ignore_errors=True)
     shutil.rmtree(scratch, ignore_errors=True)

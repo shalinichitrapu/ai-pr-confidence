@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from .telemetry import log, tracer
+from .telemetry import log, meter, tracer
+
+answers_graded = meter.create_counter(
+    "studybuddy.quiz.answers", description="Questions graded, by result"
+)
+quiz_score = meter.create_histogram("studybuddy.quiz.score", unit="%", description="Quiz scores")
 
 
 @dataclass
@@ -34,10 +39,15 @@ def grade_quiz(answers: Dict[str, Any], key: Dict[str, Any]) -> QuizResult:
         for question, expected in key.items():
             if question in answers and answers[question] == expected:
                 correct += 1
+                answers_graded.add(1, {"result": "correct"})
             else:
                 missed.append(question)
+                answers_graded.add(1, {"result": "missed"})
         extra = set(answers) - set(key)
         if extra:
             log.warning("ignoring %d answers for unknown questions", len(extra))
         span.set_attribute("quiz.correct", correct)
-        return QuizResult(correct=correct, total=len(key), missed=missed)
+        result = QuizResult(correct=correct, total=len(key), missed=missed)
+        if key:
+            quiz_score.record(result.percent)
+        return result

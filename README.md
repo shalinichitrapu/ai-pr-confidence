@@ -28,7 +28,8 @@ turns the difference into a score a reviewer can act on.
 
 1. Find the merge base of the PR and check out **before** and **after** snapshots (git worktrees).
 2. Run the test suite on both with coverage.py and a pytest plugin that installs an
-   in-memory OpenTelemetry SDK and captures WARNING+ logs, tagged per test.
+   in-memory OpenTelemetry SDK (traces and metrics), captures WARNING+ logs and
+   measures each test's peak memory with `tracemalloc`, all tagged per test.
 3. Compare the runs:
 
 | Signal | Deduction | Why it matters |
@@ -39,6 +40,8 @@ turns the difference into a score a reviewer can act on.
 | New ERROR log signatures | −15 first, −5 each more (max −20) | Errors swallowed and logged while tests stay green |
 | New exceptions recorded on spans | −10 first, −5 each more (max −15) | Same, seen through traces |
 | Traced operations ≥2× slower (and ≥5 ms) | −10 each (max −20) | Performance regressions |
+| App metrics that at least doubled in the same test (and grew by ≥3), or new error-like counters | −10 first, −5 each more (max −20) | The same test doing much more work (e.g. repeated queries), or failures now being counted |
+| Tests whose peak memory at least doubled (and grew by ≥5 MB) | −10 each (max −20) | Leaks, unbounded caches, loading too much at once |
 | Very large diff (>400 lines) | −5 | Harder to review |
 
 Bands: **High** ≥ 85, **Medium** 60–84, **Low** < 60.
@@ -49,6 +52,18 @@ Bands: **High** ≥ 85, **Medium** 60–84, **Low** < 60.
 
 The app being tested only needs the OpenTelemetry **API**. The agent supplies the
 SDK at test time, so no changes to the target project are required.
+
+**How metrics are compared.** Each test runs the same inputs before and after, so
+its metrics should barely move. For every metric series (name plus attributes),
+the agent compares what one test recorded in each run:
+
+- **Counters and up-down counters:** the amount added during the test.
+- **Gauges:** the last value set.
+- **Histograms:** the mean of the recorded values.
+
+A counter is "error-like" if its name or an attribute value contains error,
+fail, invalid, exception, retry, timeout or reject. A new one of those in a test
+that already existed is flagged, even without a before value to compare.
 
 ## Install
 
@@ -82,9 +97,13 @@ The report is written to `confidence-report/report.md`, with the raw numbers in
 `result.json`. The agent checks out both versions in temporary git worktrees,
 so your working copy isn't touched.
 
-Your code doesn't need any changes. If it already uses the OpenTelemetry API
-for tracing, the trace signals (exceptions on spans, slowdowns) work too.
-Without it, you still get the test, coverage and log signals.
+Your code doesn't need any changes. You always get the test, coverage, log and
+memory signals. If your code already uses the OpenTelemetry API, you also get:
+
+- **Tracing:** exceptions on spans and slowdowns.
+- **Metrics:** counters, up-down counters, gauges and histograms compared per test.
+
+Peak-memory tracking makes tests run roughly 2–3× slower. Pass `--no-memory` to skip it.
 
 ## Add it to your GitHub pull requests
 
@@ -146,7 +165,10 @@ confidence-agent --base origin/main --head origin/my-branch --source my_package 
 ## Try the demo
 
 `studybuddy/` is a small study-helper app (quiz grading, spaced-repetition
-flashcards, study plans) with 15 tests. Four branches simulate AI-generated PRs:
+flashcards, study plans) with 15 tests. It records OpenTelemetry traces and
+metrics: counters for graded answers, flashcard reviews and plan allocations,
+a gauge for the next review interval, and histograms for quiz scores and minutes
+per topic. Five branches simulate AI-generated PRs:
 
 | Branch | What the "AI" did | Expected result |
 |---|---|---|
@@ -154,6 +176,7 @@ flashcards, study plans) with 15 tests. Four branches simulate AI-generated PRs:
 | `feature/mastery-report` | New feature, no tests | 🟡 Medium: changed lines never run |
 | `fix/normalize-quiz-answers` | Tests still pass, but numeric answers now raise, get caught and logged | 🟡 Medium: only telemetry catches it |
 | `refactor/planner-rounding` | Breaks a test and deletes another | 🔴 Low |
+| `refactor/planner-per-day` | Same plan, but rebuilt for every day: 3× the work in one test | 🟢 High (90): only metrics catch it |
 
 The third branch is the point of the project: **every test passes**, and a
 coverage-only or tests-only gate would approve it.
@@ -186,7 +209,7 @@ confidence-agent --base origin/main --head origin/fix/normalize-quiz-answers --s
 Get-Content confidence-report\report.md
 ```
 
-Swap in any of the other three demo branches for `--head`.
+Swap in any of the other demo branches for `--head`.
 
 ## Optional: plain-English summaries from a local model
 
@@ -282,7 +305,7 @@ roughly tens of seconds per summary. A recent Mac or a GPU is much faster.
 ```
 confidence-agent [--repo .] [--base main] [--head HEAD]
                  [--source PKG] [--tests tests] [--out confidence-report]
-                 [--no-llm] [--llm-url URL] [--llm-model NAME]
+                 [--no-memory] [--no-llm] [--llm-url URL] [--llm-model NAME]
                  [--post-to-pr N] [--min-score N]
 ```
 
@@ -296,3 +319,6 @@ confidence-agent [--repo .] [--base main] [--head HEAD]
 - Weights are hand-tuned. Next: label a set of real AI-generated PRs
   (merged cleanly vs. reverted or caused incidents) and fit weights to them.
 - Latency comparison uses medians from a single run; repeated runs would cut noise.
+- Metric thresholds (2× and +3) ignore units, and a metric that grows because of a
+  wanted feature is still flagged. Read metric deductions as "look here", not "this is a bug".
+- `tracemalloc` only sees memory Python allocates; some native libraries' memory isn't counted.

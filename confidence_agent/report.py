@@ -24,6 +24,10 @@ def _lines(nums):
     return ", ".join(out)
 
 
+def _num(x) -> str:
+    return f"{x:g}" if isinstance(x, (int, float)) else str(x)
+
+
 def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str]) -> str:
     md = [MARKER, f"## {ICON[score.band]} AI change confidence: **{score.value}/100 ({score.band})**", ""]
 
@@ -54,12 +58,22 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     if signals.latency_regressions:
         details += ["**Latency regressions** (median span duration)",
                     *[f"- `{k}`: {v['before_ms']} ms → {v['after_ms']} ms" for k, v in signals.latency_regressions.items()], ""]
+    if signals.metric_regressions:
+        details += ["**Metrics that grew** (same test, before → after)",
+                    *[f"- `{k}` ({v['kind']}) in `{v['test']}`: {_num(v['before'])} → {_num(v['after'])}"
+                      for k, v in signals.metric_regressions.items()], ""]
+    if signals.new_error_metrics:
+        details += ["**New error counters**",
+                    *[f"- `{k}` × {_num(v)}" for k, v in signals.new_error_metrics.items()], ""]
+    if signals.memory_regressions:
+        details += ["**Peak memory per test**",
+                    *[f"- `{k}`: {v['before_mb']} MB → {v['after_mb']} MB" for k, v in signals.memory_regressions.items()], ""]
     if details:
         md += ["<details><summary>Evidence details</summary>", "", *details, "</details>", ""]
 
     md.append(
         f"<sub>Compared `{head_sha[:7]}` against merge base `{base_sha[:7]}` · "
         f"{signals.tests_total} tests · {signals.diff_lines} lines changed · "
-        "score is deterministic: tests, changed-line coverage, logs, traces, latency</sub>"
+        "score is deterministic: tests, changed-line coverage, logs, traces, latency, metrics, memory</sub>"
     )
     return "\n".join(md)

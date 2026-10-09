@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-from .telemetry import log, tracer
+from .telemetry import log, meter, tracer
+
+allocations = meter.create_counter(
+    "studybuddy.planner.allocations", description="Topic time allocations computed"
+)
+minutes_per_topic = meter.create_histogram(
+    "studybuddy.planner.minutes_per_topic", unit="min", description="Minutes given to a topic per day"
+)
 
 
 def build_study_plan(
@@ -29,4 +36,6 @@ def build_study_plan(
         for name, difficulty in topics:
             weight = max(1, min(5, difficulty))
             day_plan[name] = round(minutes_per_day * weight / total_weight)
+            allocations.add(1)
+            minutes_per_topic.record(day_plan[name])
         return [dict(day_plan) for _ in range(days)]

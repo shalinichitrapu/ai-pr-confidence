@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from .telemetry import tracer
+from .telemetry import meter, tracer
+
+reviews = meter.create_counter("studybuddy.srs.reviews", description="Flashcard reviews, by outcome")
+next_interval = meter.create_gauge(
+    "studybuddy.srs.next_interval", unit="d", description="Days until the card last reviewed is due again"
+)
 
 MIN_EASE = 1.3
 
@@ -30,6 +35,7 @@ def next_review(card: Card, quality: int) -> Card:
         if quality < 3:
             # Forgotten: start the card over, but keep its ease.
             updated = replace(card, repetitions=0, interval_days=1)
+            reviews.add(1, {"outcome": "forgotten"})
         else:
             reps = card.repetitions + 1
             if reps == 1:
@@ -45,5 +51,7 @@ def next_review(card: Card, quality: int) -> Card:
                 interval_days=interval,
                 ease=max(MIN_EASE, round(ease, 2)),
             )
+            reviews.add(1, {"outcome": "remembered"})
         span.set_attribute("srs.interval_days", updated.interval_days)
+        next_interval.set(updated.interval_days)
         return updated
