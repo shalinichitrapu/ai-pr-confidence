@@ -53,6 +53,7 @@ class Diff:
     lines_added: int = 0
     lines_removed: int = 0
     added_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> added lines
+    head_source: Dict[str, str] = field(default_factory=dict)  # changed .py file -> its text at head
     removed_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> removed lines
 
     @property
@@ -128,4 +129,9 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
             diff.added_text.setdefault(current, []).append(line[1:])
         elif line.startswith("-") and old:
             diff.removed_text.setdefault(old, []).append(line[1:])
+    for path in diff.added_lines:
+        if path.endswith(".py"):
+            text = read_file(repo, head, path)
+            if text is not None:
+                diff.head_source[path] = text
     return diff

@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
 from .gitutil import Diff
+from .swallow import silent_excepts
 from .runner import RunResult
 
 # Thresholds (how much slower, how much a metric or memory must grow) come from
@@ -217,6 +218,7 @@ def _without_ignored(diff: Diff, cfg: Config) -> Tuple[Diff, List[str]]:
         lines_removed=diff.lines_removed,
         added_text=keep(diff.added_text),
         removed_text=keep(diff.removed_text),
+        head_source=keep(diff.head_source),
     )
     return kept, ignored
 
@@ -228,6 +230,14 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     s = Signals(otel_enabled=head.otel_enabled)
     diff, s.ignored_files = _without_ignored(diff, cfg)
     s.hidden_code = _hidden_code(diff, tests_path)
+    silenced = [
+        f"{path}:{line}: {diff.head_source[path].splitlines()[line - 1].strip()}"
+        for path, text in diff.head_source.items()
+        if not _is_test_file(path, tests_path)
+        for line in silent_excepts(text, diff.added_lines.get(path, ()))
+    ]
+    if silenced:
+        s.hidden_code["errors silenced without a trace"] = silenced
 
     s.tests_total = len(head.tests)
     s.tests_failed = head.failed
