@@ -81,7 +81,7 @@ that already existed is flagged, even without a before value to compare.
 
 ## Install
 
-You need Python 3.9+ and git. The agent runs on macOS, Linux and Windows.
+You need Python 3.9+ and git. The agent runs on macOS and Linux. Windows isn't supported.
 
 Install it into the **same virtual environment as the project you want to
 score**. The agent runs your tests with that environment's Python, so your
@@ -215,9 +215,7 @@ coverage-only or tests-only gate would approve it.
 
 ### Try it
 
-Clone this repository to get the demo app and all four branches:
-
-**macOS / Linux**
+Clone this repository to get the demo app and all five branches:
 
 ```bash
 git clone https://github.com/shalinichitrapu/ai-pr-confidence.git
@@ -227,18 +225,6 @@ pip install .
 
 confidence-agent --base origin/main --head origin/fix/normalize-quiz-answers --source studybuddy --no-llm
 cat confidence-report/report.md
-```
-
-**Windows (PowerShell)**
-
-```powershell
-git clone https://github.com/shalinichitrapu/ai-pr-confidence.git
-cd ai-pr-confidence
-py -3 -m venv .venv; .venv\Scripts\Activate.ps1
-pip install .
-
-confidence-agent --base origin/main --head origin/fix/normalize-quiz-answers --source studybuddy --no-llm
-Get-Content confidence-report\report.md
 ```
 
 Swap in any of the other demo branches for `--head`.
@@ -272,6 +258,8 @@ as a hint, and the table as the evidence.
 
 The agent uses [Ollama](https://ollama.com). Run it on the same machine as the
 agent, or on another computer on your home network (e.g. a desktop with more RAM).
+The model machine can run macOS, Linux or Windows, even though the agent itself
+needs macOS or Linux.
 
 **1. Install Ollama and pull a model** on the machine that will run the model:
 
@@ -321,15 +309,8 @@ Find the model machine's local IP address (e.g. 192.168.1.50):
 **4. Point the agent at it** from the machine that runs the agent:
 
 ```bash
-# macOS / Linux
 export OLLAMA_URL=http://192.168.1.50:11434
 curl $OLLAMA_URL/api/tags
-```
-
-```powershell
-# Windows (PowerShell)
-$env:OLLAMA_URL = "http://192.168.1.50:11434"
-curl.exe "$env:OLLAMA_URL/api/tags"
 ```
 
 Then run the agent without `--no-llm`. Or pass `--llm-url` instead of setting
