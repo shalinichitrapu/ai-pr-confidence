@@ -135,6 +135,20 @@ and reused by later runs against the same commit, keyed by the commit, `--source
 own version. Anything different means a fresh run. `--cache-dir` moves it and
 `--no-cache` turns it off.
 
+**Running only the affected tests (opt-in).** With `--select-tests` (or
+`select_tests = true` in `[tool.confidence]`), the agent uses the base run's
+per-test coverage to run only the tests that executed the changed functions, plus
+every test in changed test files. A changed import selects every test that ran
+that file, and a brand-new file needs none. It runs the whole suite instead
+whenever it can't trace the effect safely:
+- other module-level or class-level code changed (a test may read a constant without running anything)
+- a `conftest.py` changed
+- Python files outside `--source` were changed or deleted
+- config, dependency or data files changed
+- nothing could be selected
+
+The report says which happened.
+
 **Installed projects and `src/` layouts.** The agent puts each checkout (and its
 `src/` folder, if there is one) first on the import path, so tests import the
 version being scored even if the project is installed with `pip install -e`. If
@@ -157,6 +171,7 @@ min_score = 60                 # default for --min-score
 ignore = ["*/migrations/*", "*_pb2.py"]               # changed files that are never scored
 expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures shown but not scored
 allow_self_ack = false         # may a PR's author acknowledge their own deductions?
+select_tests = false           # run only the tests the change can affect
 
 [tool.confidence.bands]
 high = 85

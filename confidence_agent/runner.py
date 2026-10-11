@@ -12,7 +12,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 PLUGIN_MODULE = "confidence_pytest_plugin"
 
@@ -113,7 +113,8 @@ def rerun_tests(workdir: Path, test_ids: List[str]) -> Dict[str, str]:
 
 
 def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_memory: bool = True,
-              repo: Path = None) -> RunResult:
+              repo: Path = None, targets: Optional[List[str]] = None) -> RunResult:
+    """targets: specific test files or node ids to run instead of the whole tests_path."""
     scratch = Path(tempfile.mkdtemp(prefix=f"confidence-{label}-"))
     plugin_dir = _plugin_dir()
     junit = scratch / "junit.xml"
@@ -134,7 +135,7 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_mem
 
     cmd = [
         sys.executable, "-m", "coverage", "run", f"--source={source}",
-        "-m", "pytest", tests_path, "-q", "-p", PLUGIN_MODULE,
+        "-m", "pytest", *(targets or [tests_path]), "-q", "-p", PLUGIN_MODULE,
         f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider",
     ]
     if importlib.util.find_spec("xdist") is not None:

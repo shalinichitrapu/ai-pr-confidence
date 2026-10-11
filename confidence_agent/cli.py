@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import cache, config, gitutil, llm, mutate, report, runner, scoring, signals
+from . import cache, config, gitutil, llm, choose_tests, mutate, report, runner, scoring, signals
 
 
 def parse_args(argv=None):
@@ -34,6 +34,9 @@ def parse_args(argv=None):
     p.add_argument("--cache-dir", type=Path, default=None,
                    help="where to keep base-run results between runs (default: ~/.cache/confidence-agent)")
     p.add_argument("--no-cache", action="store_true", help="always rerun the base tests")
+    p.add_argument("--select-tests", action="store_true",
+                   help="run only the tests that can be affected by the change; falls back to all tests "
+                        "when that can't be traced safely (default: [tool.confidence] select_tests)")
     p.add_argument("--no-llm", action="store_true", help="skip the plain-English summary")
     p.add_argument("--llm-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     p.add_argument("--llm-model", default=os.environ.get("OLLAMA_MODEL", "qwen2.5:3b"))
@@ -69,6 +72,8 @@ def main(argv=None) -> int:
 
     tmp = Path(tempfile.mkdtemp(prefix="confidence-wt-"))
     runs = {}
+    notes = []
+    selection = None
     try:
         cache_dir = args.cache_dir or cache.default_dir()
         base_key = cache.key(base_sha, args.source, args.tests, not args.no_memory)
@@ -82,9 +87,21 @@ def main(argv=None) -> int:
                 continue
             wt = tmp / label
             gitutil.add_worktree(repo, sha, wt)
+            targets = None
+            if label == "head" and (args.select_tests or cfg.select_tests):
+                selection, why = choose_tests.plan(diff, runs["base"], args.tests, args.source, cfg)
+                if selection is None:
+                    notes.append(f"Ran every test: test selection was on, but {why}.")
+                else:
+                    targets = selection.targets()
+                    runs["base"] = choose_tests.restrict(runs["base"], selection)
+                    notes.append(
+                        f"Ran only the tests the changed code can affect: {len(selection.node_ids)} existing "
+                        f"test(s) and {len(selection.test_files)} changed test file(s) (--select-tests)."
+                    )
             print(f"[confidence] running tests on {label}...")
             runs[label] = runner.run_tests(
-                wt, label, args.source, args.tests, track_memory=not args.no_memory, repo=repo
+                wt, label, args.source, args.tests, track_memory=not args.no_memory, repo=repo, targets=targets
             )
             if label == "head":
                 # Rerun tests that newly fail once, so one flaky test can't sink the score.
@@ -115,7 +132,6 @@ def main(argv=None) -> int:
     for warning in sig.warnings:
         print(f"[confidence] WARNING: {warning}")
     acks = {a.strip().lower(): "the command line" for a in args.ack.split(",") if a.strip()}
-    notes = []
     if args.post_to_pr:
         from .github import acknowledgements
         labels, author = acknowledgements(repo, args.post_to_pr)
