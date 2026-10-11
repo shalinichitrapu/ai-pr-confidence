@@ -148,10 +148,18 @@ jobs:
             --source my_package \
             --no-llm \
             --post-to-pr ${{ github.event.pull_request.number }}
+
+      - name: Add report to job summary
+        if: always()
+        run: cat confidence-report/report.md >> "$GITHUB_STEP_SUMMARY" || true
 ```
 
 The agent posts a single comment and updates it on each new push. Add
 `--min-score 60` to fail the check below 60, so you can make it required before merging.
+
+Pull requests from forks get a read-only token, so GitHub refuses the comment.
+The agent prints a warning instead of failing, and the report still appears on
+the run's summary page.
 
 GitHub's servers can't reach a model on your own network, so CI comments have no
 summary. To add one to a pull request's comment, run the agent from your own
