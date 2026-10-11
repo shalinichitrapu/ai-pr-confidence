@@ -106,6 +106,15 @@ memory signals. If your code already uses the OpenTelemetry API, you also get:
 
 Peak-memory tracking makes tests run roughly 2–3× slower. Pass `--no-memory` to skip it.
 
+**Installed projects and `src/` layouts.** The agent puts each checkout (and its
+`src/` folder, if there is one) first on the import path, so tests import the
+version being scored even if the project is installed with `pip install -e`. If
+tests still import files from your working copy, the report shows a warning that
+the results may be unreliable.
+
+**Parallel tests.** If your pytest config uses pytest-xdist (`-n`), the agent runs
+tests in a single process. Coverage and telemetry can't see parallel workers.
+
 ## Add it to your GitHub pull requests
 
 To score every pull request and post the result as a comment, add this file to

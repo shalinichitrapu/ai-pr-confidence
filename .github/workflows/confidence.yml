@@ -20,7 +20,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install -r requirements.txt
+      # pytest-xdist is only for the agent's own tests of parallel test runs.
+      - run: pip install -r requirements.txt pytest-xdist
 
       # GitHub's runners can't reach the model on your home desktop, so CI posts
       # the score without the plain-English summary. Run scripts/score_pr.sh on

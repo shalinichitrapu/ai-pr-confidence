@@ -31,6 +31,9 @@ def _num(x) -> str:
 def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str]) -> str:
     md = [MARKER, f"## {ICON[score.band]} AI change confidence: **{score.value}/100 ({score.band})**", ""]
 
+    for warning in signals.warnings:
+        md += [f"> ⚠️ **Results may be unreliable.** {warning}", ""]
+
     if summary:
         md += ["**Summary** _(written by a local model from the evidence below; it does not affect the score)_", "", summary, ""]
 
