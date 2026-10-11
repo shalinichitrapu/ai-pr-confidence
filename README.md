@@ -150,6 +150,7 @@ tests = "tests"                # default for --tests
 min_score = 60                 # default for --min-score
 ignore = ["*/migrations/*", "*_pb2.py"]               # changed files that are never scored
 expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures shown but not scored
+allow_self_ack = false         # may a PR's author acknowledge their own deductions?
 
 [tool.confidence.bands]
 high = 85
@@ -204,6 +205,7 @@ name: AI change confidence
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -243,6 +245,14 @@ jobs:
 
 The agent posts a single comment and updates it on each new push. Add
 `--min-score 60` to fail the check below 60, so you can make it required before merging.
+
+**Acknowledging a deduction.** When a deduction is expected (say a metric grows
+because of a wanted feature), a reviewer can add a label named
+`confidence-ack:<signal>`, e.g. `confidence-ack:metrics`. The workflow reruns on label
+changes. The deduction stays in the report, shown as "0 (−10 acknowledged by
+@reviewer)", and no longer counts toward the score or `--min-score`. Labels added by
+the pull request's own author are ignored unless `allow_self_ack = true` is set in
+`[tool.confidence]`. Locally, `--ack metrics,size` does the same.
 
 Pull requests from forks get a read-only token, so GitHub refuses the comment.
 The agent prints a warning instead of failing, and the report still appears on

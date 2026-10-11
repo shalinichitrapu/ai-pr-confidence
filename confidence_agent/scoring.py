@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .config import Config
 from .signals import Signals
@@ -21,9 +21,12 @@ class Score:
     band: str
     deductions: List[Tuple[str, int, str]] = field(default_factory=list)  # (signal, points, reason)
     passed_checks: List[str] = field(default_factory=list)
+    # (signal, points, reason, who) for deductions a reviewer acknowledged: shown, not counted
+    acknowledged: List[Tuple[str, int, str, str]] = field(default_factory=list)
 
 
-def score(s: Signals, config: Optional[Config] = None) -> Score:
+def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, str]] = None) -> Score:
+    """acks: {signal name, lowercase: who acknowledged it} for deductions to show but not count."""
     cfg = config or Config()
     w = cfg.weights
     deductions: List[Tuple[str, int, str]] = []
@@ -152,6 +155,9 @@ def score(s: Signals, config: Optional[Config] = None) -> Score:
         )
 
     deductions = [d for d in deductions if d[1] > 0]  # a weight set to 0 turns that check off
+    acks = {k.lower(): v for k, v in (acks or {}).items()}
+    acknowledged = [(sig, pts, reason, acks[sig.lower()]) for sig, pts, reason in deductions if sig.lower() in acks]
+    deductions = [d for d in deductions if d[0].lower() not in acks]
     value = max(0, 100 - sum(p for _, p, _ in deductions))
     band = "High" if value >= cfg.bands.high else "Medium" if value >= cfg.bands.medium else "Low"
-    return Score(value=value, band=band, deductions=deductions, passed_checks=passed)
+    return Score(value=value, band=band, deductions=deductions, passed_checks=passed, acknowledged=acknowledged)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 MARKER = "<!-- ai-pr-confidence -->"
 ICON = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}
@@ -28,7 +28,7 @@ def _num(x) -> str:
     return f"{x:g}" if isinstance(x, (int, float)) else str(x)
 
 
-def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str]) -> str:
+def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str], notes: Sequence[str] = ()) -> str:
     md = [MARKER, f"## {ICON[score.band]} AI change confidence: **{score.value}/100 ({score.band})**", ""]
 
     for warning in signals.warnings:
@@ -37,9 +37,13 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     md += ["| Signal | Impact | Evidence |", "|---|---:|---|"]
     for signal, pts, reason in score.deductions:
         md.append(f"| {signal} | −{pts} | {reason} |")
+    for signal, pts, reason, who in score.acknowledged:
+        md.append(f"| {signal} | 0 (−{pts} acknowledged by {who}) | {reason} |")
     for check in score.passed_checks:
         md.append(f"| ✓ | 0 | {check} |")
     md.append("")
+    for note in notes:
+        md += [f"_{note}_", ""]
 
     # Below the measured evidence, not above it: the model reads text the pull
     # request controls, so its summary should never be the first thing a reviewer sees.

@@ -2,6 +2,8 @@ name: AI change confidence
 
 on:
   pull_request:
+    # labeled/unlabeled: rescore when a reviewer adds a confidence-ack:<signal> label
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read

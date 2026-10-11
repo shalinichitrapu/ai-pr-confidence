@@ -35,6 +35,9 @@ def parse_args(argv=None):
     p.add_argument("--llm-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     p.add_argument("--llm-model", default=os.environ.get("OLLAMA_MODEL", "qwen2.5:3b"))
     p.add_argument("--post-to-pr", type=int, metavar="NUMBER", help="post/update the report as a PR comment via gh")
+    p.add_argument("--ack", default="", metavar="SIGNALS",
+                   help="comma-separated deductions to show but not count, e.g. metrics,size "
+                        "(on a PR, use labels like confidence-ack:metrics instead)")
     p.add_argument("--min-score", type=int,
                    help="exit 1 if the score is below this, for CI gates (default: [tool.confidence] min_score, else 0)")
     return p.parse_args(argv)
@@ -97,7 +100,20 @@ def main(argv=None) -> int:
     sig = signals.compute(runs["base"], runs["head"], diff, args.tests, args.source, cfg)
     for warning in sig.warnings:
         print(f"[confidence] WARNING: {warning}")
-    result = scoring.score(sig, cfg)
+    acks = {a.strip().lower(): "the command line" for a in args.ack.split(",") if a.strip()}
+    notes = []
+    if args.post_to_pr:
+        from .github import acknowledgements
+        labels, author = acknowledgements(repo, args.post_to_pr)
+        for signal, who in labels.items():
+            if who == author and not cfg.allow_self_ack:
+                notes.append(f"Ignored confidence-ack:{signal}: added by the pull request's author "
+                             f"(@{who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
+            else:
+                acks[signal] = f"@{who}"
+    for note in notes:
+        print(f"[confidence] {note}")
+    result = scoring.score(sig, cfg, acks)
     print(f"[confidence] score {result.value}/100 ({result.band})")
 
     summary = None
@@ -105,7 +121,7 @@ def main(argv=None) -> int:
         print(f"[confidence] asking {args.llm_model} at {args.llm_url} for a summary (can take a minute on CPU)...")
         summary = llm.summarize(args.llm_url, args.llm_model, result, sig)
 
-    md = report.render(result, sig, base_sha, head_sha, summary)
+    md = report.render(result, sig, base_sha, head_sha, summary, notes)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "report.md").write_text(md, encoding="utf-8")
@@ -113,6 +129,7 @@ def main(argv=None) -> int:
         json.dumps(
             {"score": result.value, "band": result.band,
              "deductions": [{"signal": s, "points": p, "reason": r} for s, p, r in result.deductions],
+             "acknowledged": [{"signal": s, "points": p, "reason": r, "by": w} for s, p, r, w in result.acknowledged],
              "passed_checks": result.passed_checks, "signals": sig.to_dict(), "summary": summary,
              "base": base_sha, "head": head_sha},
             indent=2,
