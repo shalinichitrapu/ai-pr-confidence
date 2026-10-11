@@ -62,9 +62,10 @@ def test_no_changed_code_lines_means_no_coverage_row():
     assert points(r, "Coverage") == 0
 
 
-def test_error_logs_cost_15_then_5_each_up_to_20():
-    assert points(score(clean(new_error_logs={"a": 3})), "Logs") == 15
-    assert points(score(clean(new_error_logs={"a": 1, "b": 1, "c": 1})), "Logs") == 20
+def test_error_logs_cost_20_then_5_each_up_to_25():
+    assert points(score(clean(new_error_logs={"a": 3})), "Logs") == 20
+    assert points(score(clean(new_error_logs={"a": 1, "b": 1})), "Logs") == 25
+    assert points(score(clean(new_error_logs={"a": 1, "b": 1, "c": 1})), "Logs") == 25
 
 
 def test_span_exceptions_cost_10_then_5_each_up_to_15():
@@ -109,9 +110,9 @@ def test_large_diff_costs_5():
 
 
 def test_bands():
-    assert score(clean(new_error_logs={"a": 1})).band == "High"  # 85
+    assert score(clean(latency_regressions={"a": {}})).band == "High"  # 90
     medium = clean(new_error_logs={"a": 1}, new_span_exceptions={"b": 1},
-                   latency_regressions={"c": {}}, code_diff_lines=500)
+                   latency_regressions={"c": {}})
     assert score(medium).value == 60 and score(medium).band == "Medium"
     assert score(clean(tests_newly_failing=["a"])).band == "Low"  # 55
 
