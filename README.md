@@ -41,7 +41,7 @@ automatic first check worth having. It doesn't replace code review.
 |---|---|---|
 | Tests that newly fail | −45 first, −5 each more (max −55), so the score is always Low | The change broke behavior |
 | No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
-| Tests removed | −15 (a test with the same name in another module counts as moved, not removed) | AI tools sometimes delete the failing test |
+| Tests removed | −15 (a test whose file was renamed, keeping its name, counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
 | Code hidden from these checks: new `# pragma: no cover`, or error logging, tracing or metric instruments removed (net, so moved code doesn't count) | −10 per kind (max −20) | Hiding code from coverage or telemetry raises the score without making the code safer |
 | New ERROR log signatures | −20 first, −5 each more (max −25), so one is enough to leave High | Errors swallowed and logged while tests stay green |

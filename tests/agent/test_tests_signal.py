@@ -6,8 +6,9 @@ from confidence_agent.signals import Signals, compute
 from confidence_agent.gitutil import Diff
 
 
-def signals(base_tests, head_tests):
-    return compute(RunResult("base", tests=base_tests), RunResult("head", tests=head_tests), Diff(), "tests")
+def signals(base_tests, head_tests, renamed=None):
+    diff = Diff(renamed=renamed or {})
+    return compute(RunResult("base", tests=base_tests), RunResult("head", tests=head_tests), diff, "tests")
 
 
 def test_any_newly_failing_test_means_low():
@@ -31,19 +32,30 @@ def test_no_test_results_is_not_a_clean_score():
     assert "No test results" in r.deductions[0][2]
 
 
-def test_test_moved_to_another_module_is_not_removed():
+def test_tests_in_a_renamed_file_are_moved_not_removed():
     s = signals(
-        {"tests.test_old::test_add": "passed", "tests.test_old::test_gone": "passed"},
-        {"tests.test_new::test_add": "passed"},
+        {"tests.test_old::test_add": "passed", "tests.test_old::test_gone": "passed",
+         "tests.test_old.TestMath::test_sub": "passed"},
+        {"tests.test_new::test_add": "passed", "tests.test_new.TestMath::test_sub": "passed"},
+        renamed={"tests/test_new.py": "tests/test_old.py"},
     )
-    assert s.tests_moved == {"tests.test_old::test_add": "tests.test_new::test_add"}
+    assert s.tests_moved == {
+        "tests.test_old::test_add": "tests.test_new::test_add",
+        "tests.test_old.TestMath::test_sub": "tests.test_new.TestMath::test_sub",
+    }
     assert s.tests_removed == ["tests.test_old::test_gone"]
 
 
-def test_each_added_test_can_only_claim_one_removed_test():
-    s = signals({"a.m1::test_x": "passed", "a.m2::test_x": "passed"}, {"a.m3::test_x": "passed"})
-    assert len(s.tests_moved) == 1
-    assert len(s.tests_removed) == 1
+def test_same_name_in_another_file_without_a_rename_is_a_removal():
+    # Deleting a failing test and adding a weaker one with the same name elsewhere
+    # must not hide the deletion.
+    s = signals(
+        {"tests.test_pay::test_refund_is_exact": "passed", "tests.test_pay::test_other": "passed"},
+        {"tests.test_misc::test_refund_is_exact": "passed", "tests.test_pay::test_other": "passed"},
+    )
+    assert s.tests_moved == {}
+    assert s.tests_removed == ["tests.test_pay::test_refund_is_exact"]
+    assert score(s).value == 85
 
 
 def test_renamed_test_function_still_counts_as_removed():

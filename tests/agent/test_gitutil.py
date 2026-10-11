@@ -62,6 +62,7 @@ def test_renamed_file_reports_its_new_path(repo):
     commit(repo, {"tests/test_new.py": "a\nb\nc\nd\ne\nf\n"})
     d = read_diff(repo, "HEAD~1", "HEAD")
     assert d.files_changed == ["tests/test_new.py"]
+    assert d.renamed == {"tests/test_new.py": "tests/test_old.py"}
     assert d.added_lines == {"tests/test_new.py": {6}}
     assert d.size == 1
 

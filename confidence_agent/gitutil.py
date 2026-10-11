@@ -41,6 +41,7 @@ class Diff:
     added_lines: Dict[str, Set[int]] = field(default_factory=dict)
     files_changed: List[str] = field(default_factory=list)
     file_lines: Dict[str, int] = field(default_factory=dict)  # path -> lines added + removed
+    renamed: Dict[str, str] = field(default_factory=dict)  # new path -> old path, as git detected
     lines_added: int = 0
     lines_removed: int = 0
     added_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> added lines
@@ -54,8 +55,10 @@ class Diff:
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
-def _numstat(repo: Path, base: str, head: str) -> List[Tuple[str, str, str]]:
-    """(added, removed, path) per file; "-" counts for binary files.
+def _numstat(repo: Path, base: str, head: str) -> List[Tuple[str, str, str, str]]:
+    """(added, removed, path, old_path) per file; "-" counts for binary files.
+
+    old_path is set only for files git detected as renamed or copied.
 
     Uses -z so a renamed file reports its new path rather than git's
     display form "dir/{old => new}".
@@ -64,20 +67,23 @@ def _numstat(repo: Path, base: str, head: str) -> List[Tuple[str, str, str]]:
     out, i = [], 0
     while i < len(fields) and fields[i]:
         added, removed, path = fields[i].split("\t", 2)
+        old = ""
         if path:
             i += 1
         else:  # rename or copy: old and new paths follow as separate fields
-            path = fields[i + 2]
+            old, path = fields[i + 1], fields[i + 2]
             i += 3
-        out.append((added, removed, path))
+        out.append((added, removed, path, old))
     return out
 
 
 def read_diff(repo: Path, base: str, head: str) -> Diff:
     """Parse `git diff base head` into the new-side line numbers that were added."""
     diff = Diff()
-    for added, removed, path in _numstat(repo, base, head):
+    for added, removed, path, old in _numstat(repo, base, head):
         diff.files_changed.append(path)
+        if old:
+            diff.renamed[path] = old
         if added != "-":
             diff.lines_added += int(added)
             diff.lines_removed += int(removed)
