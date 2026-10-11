@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import gitutil, llm, report, runner, scoring, signals
+from . import config, gitutil, llm, report, runner, scoring, signals
 
 
 def parse_args(argv=None):
@@ -23,8 +23,9 @@ def parse_args(argv=None):
     p.add_argument("--repo", default=".", help="path to the git repository (default: .)")
     p.add_argument("--base", default="main", help="branch or commit the change targets (default: main)")
     p.add_argument("--head", default="HEAD", help="branch or commit with the change (default: HEAD)")
-    p.add_argument("--source", default=".", help="package/folder to measure coverage for (comma-separate several); changed files outside it are not coverage-checked")
-    p.add_argument("--tests", default="tests", help="test folder (default: tests)")
+    p.add_argument("--source", help="package/folder to measure coverage for (comma-separate several); changed "
+                   "files outside it are not coverage-checked (default: [tool.confidence] source, else .)")
+    p.add_argument("--tests", help="test folder (default: [tool.confidence] tests, else tests)")
     p.add_argument("--out", default="confidence-report", help="folder for report.md and result.json")
     p.add_argument("--no-memory", action="store_true",
                    help="skip per-test peak memory measurement (tracemalloc slows tests down)")
@@ -32,7 +33,8 @@ def parse_args(argv=None):
     p.add_argument("--llm-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     p.add_argument("--llm-model", default=os.environ.get("OLLAMA_MODEL", "qwen2.5:3b"))
     p.add_argument("--post-to-pr", type=int, metavar="NUMBER", help="post/update the report as a PR comment via gh")
-    p.add_argument("--min-score", type=int, default=0, help="exit 1 if the score is below this (for CI gates)")
+    p.add_argument("--min-score", type=int,
+                   help="exit 1 if the score is below this, for CI gates (default: [tool.confidence] min_score, else 0)")
     return p.parse_args(argv)
 
 
@@ -46,6 +48,15 @@ def main(argv=None) -> int:
         return 0
 
     print(f"[confidence] base {base_sha[:7]}  head {head_sha[:7]}")
+    # Settings come from the base commit, so a pull request can't loosen its own checks.
+    try:
+        cfg = config.parse(gitutil.read_file(repo, base_sha, "pyproject.toml") or "")
+    except config.ConfigError as exc:
+        print(f"[confidence] error in [tool.confidence] at the base commit: {exc}")
+        return 2
+    args.source = args.source or cfg.source or "."
+    args.tests = args.tests or cfg.tests or "tests"
+    args.min_score = args.min_score if args.min_score is not None else (cfg.min_score or 0)
     diff = gitutil.read_diff(repo, base_sha, head_sha)
 
     tmp = Path(tempfile.mkdtemp(prefix="confidence-wt-"))
@@ -66,10 +77,10 @@ def main(argv=None) -> int:
     if not runs["head"].tests:
         print("[confidence] no test results from head run. pytest output:\n" + runs["head"].output_tail)
 
-    sig = signals.compute(runs["base"], runs["head"], diff, args.tests, args.source)
+    sig = signals.compute(runs["base"], runs["head"], diff, args.tests, args.source, cfg)
     for warning in sig.warnings:
         print(f"[confidence] WARNING: {warning}")
-    result = scoring.score(sig)
+    result = scoring.score(sig, cfg)
     print(f"[confidence] score {result.value}/100 ({result.band})")
 
     summary = None

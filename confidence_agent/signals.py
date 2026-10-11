@@ -7,24 +7,16 @@ import statistics
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .config import Config
 from .gitutil import Diff
 from .runner import RunResult
 
-# A span is "slower" only if it is both much slower and slower by a real amount,
-# so tiny timing noise in fast functions does not count.
-LATENCY_RATIO = 2.0
-LATENCY_MIN_DELTA_MS = 5.0
+# Thresholds (how much slower, how much a metric or memory must grow) come from
+# config.Thresholds. Each requires both a ratio and a real absolute change, so
+# noise in tiny values doesn't count.
 
-# Metric values from the same test with the same inputs should not move much.
-# Flag a series only if it at least doubled and grew by a real amount.
-METRIC_RATIO = 2.0
-METRIC_MIN_DELTA = 3.0
 # Names or attribute values that mark a counter as counting failures.
 ERROR_LIKE = re.compile(r"error|fail|invalid|exception|retry|retries|timeout|reject", re.IGNORECASE)
-
-# A test's peak memory must both double and grow by at least this much.
-MEMORY_RATIO = 2.0
-MEMORY_MIN_DELTA_BYTES = 5 * 1024 * 1024
 
 
 @dataclass
@@ -52,6 +44,9 @@ class Signals:
     memory_regressions: Dict[str, Dict[str, float]] = field(default_factory=dict)  # test -> MB before/after
     # kind -> example lines, for changes that make code invisible to the other checks
     hidden_code: Dict[str, List[str]] = field(default_factory=dict)
+    # Error signatures matched by [tool.confidence] expected_errors: shown, not scored.
+    expected_errors: Dict[str, int] = field(default_factory=dict)
+    ignored_files: List[str] = field(default_factory=list)  # matched [tool.confidence] ignore
 
     diff_lines: int = 0
     code_diff_lines: int = 0  # diff_lines without test files; what the size check uses
@@ -134,7 +129,8 @@ def _in_source(path: str, source: str) -> bool:
             return True
         if "/" not in src:
             src = src.replace(".", "/")  # dotted package name, e.g. my.pkg
-        if path == src or path.startswith(src + "/"):
+        # A folder, or a single module: coverage's --source=app also means app.py.
+        if path == src or path == src + ".py" or path.startswith(src + "/"):
             return True
     return False
 
@@ -206,8 +202,31 @@ def _median_durations(run: RunResult, keep: Keep = _all) -> Dict[str, float]:
     return {name: statistics.median(v) for name, v in by_name.items()}
 
 
-def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, source: str = ".") -> Signals:
+def _without_ignored(diff: Diff, cfg: Config) -> Tuple[Diff, List[str]]:
+    """A copy of the diff without files matching [tool.confidence] ignore."""
+    ignored = sorted(p for p in diff.files_changed if cfg.ignored(p))
+    if not ignored:
+        return diff, []
+    keep = lambda d: {p: v for p, v in d.items() if not cfg.ignored(p)}  # noqa: E731
+    kept = Diff(
+        added_lines=keep(diff.added_lines),
+        files_changed=[p for p in diff.files_changed if not cfg.ignored(p)],
+        file_lines=keep(diff.file_lines),
+        renamed=keep(diff.renamed),
+        lines_added=diff.lines_added,
+        lines_removed=diff.lines_removed,
+        added_text=keep(diff.added_text),
+        removed_text=keep(diff.removed_text),
+    )
+    return kept, ignored
+
+
+def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, source: str = ".",
+            config: Optional[Config] = None) -> Signals:
+    cfg = config or Config()
+    th = cfg.thresholds
     s = Signals(otel_enabled=head.otel_enabled)
+    diff, s.ignored_files = _without_ignored(diff, cfg)
     s.hidden_code = _hidden_code(diff, tests_path)
 
     s.tests_total = len(head.tests)
@@ -275,12 +294,16 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         k: v for k, v in _span_exception_signatures(head, in_new).items() if k not in base_exc
     }
 
+    for found in (s.new_error_logs, s.new_span_exceptions):
+        for sig in [k for k in found if cfg.expected(k)]:
+            s.expected_errors[sig] = s.expected_errors.get(sig, 0) + found.pop(sig)
+
     base_lat, head_lat = _median_durations(base, in_shared), _median_durations(head, in_shared)
     for name, after in head_lat.items():
         before = base_lat.get(name)
         if before is None:
             continue
-        if after >= before * LATENCY_RATIO and after - before >= LATENCY_MIN_DELTA_MS:
+        if after >= before * th.latency_ratio and after - before >= th.latency_min_delta_ms:
             s.latency_regressions[name] = {"before_ms": round(before, 2), "after_ms": round(after, 2)}
 
     # Metrics: compare each series within the same test, which ran the same inputs.
@@ -296,7 +319,7 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
                 s.new_error_metrics[series] = s.new_error_metrics.get(series, 0) + after
             continue
         growth = after - before
-        if after >= before * METRIC_RATIO and growth >= METRIC_MIN_DELTA:
+        if after >= before * th.metric_ratio and growth >= th.metric_min_delta:
             worst = s.metric_regressions.get(series)
             if worst is None or growth > worst["after"] - worst["before"]:
                 s.metric_regressions[series] = {"test": test, "kind": kind, "before": before, "after": after}
@@ -306,7 +329,7 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         before = base.memory.get(test)
         if before is None:
             continue
-        if after >= before * MEMORY_RATIO and after - before >= MEMORY_MIN_DELTA_BYTES:
+        if after >= before * th.memory_ratio and after - before >= th.memory_min_delta_mb * 2**20:
             s.memory_regressions[test] = {
                 "before_mb": round(before / 2**20, 1), "after_mb": round(after / 2**20, 1)
             }

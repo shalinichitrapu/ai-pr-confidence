@@ -89,6 +89,12 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
         for kind, lines in signals.hidden_code.items():
             details += [f"- {kind}:", *[f"  - `{line}`" for line in lines[:5]]]
         details.append("")
+    if signals.expected_errors:
+        details += ["**Expected errors** (listed in `[tool.confidence] expected_errors`, not scored)",
+                    *[f"- `{k}` × {v}" for k, v in signals.expected_errors.items()], ""]
+    if signals.ignored_files:
+        details += ["**Files not scored** (matched `[tool.confidence] ignore`)",
+                    *[f"- `{p}`" for p in signals.ignored_files], ""]
     if details:
         md += ["<details><summary>Evidence details</summary>", "", *details, "</details>", ""]
 

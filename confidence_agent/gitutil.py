@@ -6,7 +6,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 def git(repo: Path, *args: str) -> str:
@@ -19,6 +19,14 @@ def git(repo: Path, *args: str) -> str:
 
 def resolve(repo: Path, ref: str) -> str:
     return git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+
+
+def read_file(repo: Path, commit: str, path: str) -> Optional[str]:
+    """A file's contents at a commit, or None if it doesn't exist there."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{commit}:{path}"], capture_output=True, text=True
+    )
+    return proc.stdout if proc.returncode == 0 else None
 
 
 def merge_base(repo: Path, base: str, head: str) -> str:
