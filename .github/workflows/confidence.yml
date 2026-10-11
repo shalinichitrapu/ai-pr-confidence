@@ -36,3 +36,9 @@ jobs:
             --source studybuddy,confidence_agent \
             --no-llm \
             --post-to-pr ${{ github.event.pull_request.number }}
+
+      # Also show the report on the run's summary page. Pull requests from forks
+      # get a read-only token, so this is where their report appears.
+      - name: Add report to job summary
+        if: always()
+        run: cat confidence-report/report.md >> "$GITHUB_STEP_SUMMARY" || true
