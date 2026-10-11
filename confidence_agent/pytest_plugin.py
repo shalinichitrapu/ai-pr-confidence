@@ -112,14 +112,27 @@ def _collect_metrics(test: Optional[str]) -> None:
                     _metrics.append(entry)
 
 
+def _coverage_context(name: str) -> None:
+    """Tag coverage data with the running test, so each line knows which tests ran it."""
+    try:
+        import coverage
+        cov = coverage.Coverage.current()
+        if cov is not None:
+            cov.switch_context(name)
+    except Exception:  # pragma: no cover - never break the test run
+        pass
+
+
 def pytest_runtest_setup(item):
     global _current_test
     _current_test = item.nodeid
+    _coverage_context(item.nodeid)
 
 
 def pytest_runtest_teardown(item):
     global _current_test
     _current_test = None
+    _coverage_context("")
 
 
 _span_tests: Dict[int, Optional[str]] = {}

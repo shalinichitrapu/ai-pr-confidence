@@ -44,6 +44,7 @@ automatic first check worth having. It doesn't replace code review.
 | No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
 | Tests removed | −15 (a test whose file was renamed, keeping its name, counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
+| Changed lines that tests run but don't check: small edits (flip `<`, swap `+`/`-`, `True`/`False`, change a number) that no covering test notices | up to −15, proportional to the share of edits that went unnoticed | Coverage only proves a line ran, not that a test would catch it being wrong |
 | Code hidden from these checks: new `# pragma: no cover`; error logging, tracing or metric instruments removed (net, so moved code doesn't count); or a new broad `except` that drops the error without raising, logging or recording it | −10 per kind (max −20) | Hiding code or errors from coverage and telemetry raises the score without making the code safer |
 | New ERROR log signatures | −20 first, −5 each more (max −25), so one is enough to leave High | Errors swallowed and logged while tests stay green |
 | New exceptions recorded on spans | −10 first, −5 each more (max −15) | Same, seen through traces |
@@ -156,6 +157,8 @@ metric_ratio = 2.0
 metric_min_delta = 3.0
 memory_ratio = 2.0
 memory_min_delta_mb = 5.0
+max_mutants = 20               # mutation testing budget per run; 0 turns it off
+mutant_timeout_s = 60.0
 
 [tool.confidence.weights]      # [first finding, each additional, maximum]
 tests_failing = [45, 5, 55]
@@ -170,6 +173,7 @@ visibility = [10, 10, 20]
 metrics = [10, 5, 20]
 memory = [10, 10, 20]
 size = [5, 0, 5]               # [0, 0, 0] turns a check off
+mutation = [15, 0, 15]         # proportional: the maximum is what "no edit was noticed" costs
 ```
 
 The values above are the defaults. An error signature is the text after "New
@@ -412,7 +416,9 @@ points if its new code isn't tested.
   wanted feature is still flagged. Read metric deductions as "look here", not "this is a bug".
 - `tracemalloc` only sees memory Python allocates; some native libraries' memory isn't counted.
 - **Cost:** the test suite runs twice (before and after), under coverage, and memory
-  tracking makes it roughly 2–3× slower again. Use `--no-memory` for large suites.
+  tracking makes it roughly 2–3× slower again. Mutation testing then runs the tests
+  that cover each mutated line, up to `max_mutants` (20) times. Use `--no-memory` and
+  `--no-mutation` for large suites.
 - **It can be worked around.** A change written to score well, rather than to be
   correct, can avoid the checks: for example by testing only the happy path, or by
   handling errors without logging them. A High score means no warning signs were

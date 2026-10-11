@@ -33,6 +33,7 @@ class RunResult:
     # Files the tests imported from the user's repository instead of this checkout.
     outside_imports: List[str] = field(default_factory=list)
     rerun: Dict[str, str] = field(default_factory=dict)  # test id -> outcome when run again
+    mutation: Any = None  # mutate.MutationResult for the head run, if mutation testing ran
     exit_code: int = 0
     output_tail: str = ""
 
@@ -142,7 +143,7 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_mem
         cmd += ["-n", "0"]
     proc = subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
     subprocess.run(
-        [sys.executable, "-m", "coverage", "json", "-q", "-o", str(cov_json)],
+        [sys.executable, "-m", "coverage", "json", "-q", "--show-contexts", "-o", str(cov_json)],
         cwd=workdir, env=env, capture_output=True, text=True,
     )
 

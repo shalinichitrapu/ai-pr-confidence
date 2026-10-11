@@ -60,6 +60,16 @@ def score(s: Signals, config: Optional[Config] = None) -> Score:
         else:
             passed.append(f"All {s.changed_code_lines} changed code lines run under tests")
 
+    # 2b. Do the tests check the changed lines, or only run them?
+    if s.mutants_tested:
+        rate = len(s.mutants_survived) / s.mutants_tested
+        pts = round(rate * w.mutation.cap)
+        if pts:
+            deductions.append(("Mutation", pts, f"{len(s.mutants_survived)} of {s.mutants_tested} small changes "
+                               "to the changed lines went unnoticed by every test that runs them"))
+        else:
+            passed.append(f"Tests caught all {s.mutants_tested} small changes made to the changed lines")
+
     # 3. Runtime evidence from logs and traces
     # A new swallowed error on its own is enough to drop out of High, even in a
     # project without tracing to back it up.
