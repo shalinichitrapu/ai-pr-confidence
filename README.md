@@ -262,6 +262,12 @@ The model is optional, and the agent installs and runs fully without it:
 
 Add a model when you want the summary in your reports.
 
+The summary appears below the score table, marked as the model's reading. The
+model sees text the pull request controls (test names, log messages, file names),
+so that text is clipped and fenced off as data in the prompt, and the reply is cut
+down to at most four plain bullets with links and HTML removed. Treat the summary
+as a hint, and the table as the evidence.
+
 ### Setting up a local model (free)
 
 The agent uses [Ollama](https://ollama.com). Run it on the same machine as the
