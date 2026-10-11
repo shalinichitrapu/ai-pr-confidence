@@ -4,3 +4,5 @@ __pycache__/
 confidence-report/
 .venv/
 .pytest_cache/
+build/
+*.egg-info/
