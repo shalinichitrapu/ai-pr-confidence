@@ -36,6 +36,7 @@ def summarize(url: str, model: str, score, signals, timeout: int = 240) -> Optio
         "metric_regressions": signals.metric_regressions,
         "new_error_metrics": signals.new_error_metrics,
         "memory_regressions": signals.memory_regressions,
+        "hidden_code": signals.hidden_code,
     }
     prompt = PROMPT.format(
         score=score.value,

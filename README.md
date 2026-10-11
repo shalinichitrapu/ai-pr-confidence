@@ -37,6 +37,7 @@ turns the difference into a score a reviewer can act on.
 | Tests that newly fail | −40 first, −5 each more (max −50) | The change broke behavior |
 | Tests removed | −15 | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
+| Code hidden from these checks: new `# pragma: no cover`, or error logging, tracing or metric instruments removed (net, so moved code doesn't count) | −10 per kind (max −20) | Hiding code from coverage or telemetry raises the score without making the code safer |
 | New ERROR log signatures | −15 first, −5 each more (max −20) | Errors swallowed and logged while tests stay green |
 | New exceptions recorded on spans | −10 first, −5 each more (max −15) | Same, seen through traces |
 | Traced operations ≥2× slower (and ≥5 ms) | −10 each (max −20) | Performance regressions |

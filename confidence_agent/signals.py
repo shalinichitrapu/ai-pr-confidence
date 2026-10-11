@@ -46,6 +46,8 @@ class Signals:
     metric_regressions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     new_error_metrics: Dict[str, float] = field(default_factory=dict)  # series -> total in head
     memory_regressions: Dict[str, Dict[str, float]] = field(default_factory=dict)  # test -> MB before/after
+    # kind -> example lines, for changes that make code invisible to the other checks
+    hidden_code: Dict[str, List[str]] = field(default_factory=dict)
 
     diff_lines: int = 0
     files_changed: List[str] = field(default_factory=list)
@@ -63,6 +65,34 @@ class Signals:
         d = asdict(self)
         d["changed_line_coverage"] = round(self.changed_line_coverage, 3)
         return d
+
+
+# Changes that hide code from the agent rather than fix it. Each pattern is
+# counted net (removed minus added, or added minus removed for pragmas) across
+# the whole diff, so code that merely moved between files is not flagged.
+PRAGMA = re.compile(r"#\s*pragma:\s*no\s*cover", re.IGNORECASE)
+HIDING_PATTERNS = {
+    "coverage exclusions added": (PRAGMA, "added"),
+    "error logging removed": (re.compile(r"\blog\w*\.(error|exception|critical)\(", re.IGNORECASE), "removed"),
+    "tracing removed": (re.compile(r"\b(start_as_current_span|start_span|record_exception|set_status)\("), "removed"),
+    "metric instruments removed": (re.compile(r"\bcreate_(counter|up_down_counter|histogram|gauge)\("), "removed"),
+}
+
+
+def _hidden_code(diff: Diff, tests_path: str) -> Dict[str, List[str]]:
+    found: Dict[str, List[str]] = {}
+    for kind, (pattern, direction) in HIDING_PATTERNS.items():
+        hits = {"added": [], "removed": []}
+        for side, texts in (("added", diff.added_text), ("removed", diff.removed_text)):
+            for path, lines in texts.items():
+                if not path.endswith(".py") or _is_test_file(path, tests_path):
+                    continue
+                hits[side] += [f"{path}: {line.strip()}" for line in lines if pattern.search(line)]
+        other = "removed" if direction == "added" else "added"
+        net = len(hits[direction]) - len(hits[other])
+        if net > 0:
+            found[kind] = hits[direction][:net]
+    return found
 
 
 def _is_test_file(path: str, tests_path: str) -> bool:
@@ -146,6 +176,7 @@ def _median_durations(run: RunResult) -> Dict[str, float]:
 
 def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, source: str = ".") -> Signals:
     s = Signals(otel_enabled=head.otel_enabled)
+    s.hidden_code = _hidden_code(diff, tests_path)
 
     s.tests_total = len(head.tests)
     s.tests_failed = head.failed
@@ -168,6 +199,10 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             continue
         executed = set(cov.get("executed_lines", []))
         executable = executed | set(cov.get("missing_lines", []))
+        if any(PRAGMA.search(line) for line in diff.added_text.get(path, [])):
+            # This change added a coverage exclusion here, so lines it excluded
+            # still count as changed code: hiding a line must not raise the score.
+            executable |= set(cov.get("excluded_lines", []))
         changed = added & executable
         covered = changed & executed
         s.changed_code_lines += len(changed)
