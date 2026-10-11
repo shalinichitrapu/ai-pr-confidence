@@ -61,8 +61,10 @@ def score(s: Signals) -> Score:
             passed.append(f"All {s.changed_code_lines} changed code lines run under tests")
 
     # 3. Runtime evidence from logs and traces
+    # A new swallowed error on its own is enough to drop out of High, even in a
+    # project without tracing to back it up.
     if s.new_error_logs:
-        pts = _tiered(len(s.new_error_logs), 15, 5, 20)
+        pts = _tiered(len(s.new_error_logs), 20, 5, 25)
         total = sum(s.new_error_logs.values())
         deductions.append(("Logs", pts, f"{total} new ERROR log(s) across {len(s.new_error_logs)} signature(s), a sign of errors being caught and hidden"))
     else:

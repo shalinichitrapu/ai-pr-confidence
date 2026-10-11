@@ -38,7 +38,7 @@ def test_errors_in_an_existing_test_are_still_scored():
     s = compute(run([OLD]), head, Diff(), "tests")
     assert s.new_error_logs == {"app a.py:f: bad input": 1}
     assert s.new_span_exceptions == {"op: ValueError": 1}
-    assert score(s).value == 75
+    assert score(s).value == 70
 
 
 def test_records_outside_any_test_are_scored():

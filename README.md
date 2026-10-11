@@ -5,10 +5,10 @@
 tests, coverage, logs and traces, not by another model's opinion.
 
 ```
-🟡 AI change confidence: 75/100 (Medium)
+🟡 AI change confidence: 70/100 (Medium)
 
 | Signal | Impact | Evidence                                                  |
-| Logs   | −15    | 2 new ERROR logs, a sign of errors being caught and hidden |
+| Logs   | −20    | 2 new ERROR logs, a sign of errors being caught and hidden |
 | Traces | −10    | 2 new exceptions recorded on spans                        |
 | ✓      | 0      | All 16 tests pass                                         |
 | ✓      | 0      | All 11 changed code lines run under tests                 |
@@ -44,7 +44,7 @@ automatic first check worth having. It doesn't replace code review.
 | Tests removed | −15 (a test with the same name in another module counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
 | Code hidden from these checks: new `# pragma: no cover`, or error logging, tracing or metric instruments removed (net, so moved code doesn't count) | −10 per kind (max −20) | Hiding code from coverage or telemetry raises the score without making the code safer |
-| New ERROR log signatures | −15 first, −5 each more (max −20) | Errors swallowed and logged while tests stay green |
+| New ERROR log signatures | −20 first, −5 each more (max −25), so one is enough to leave High | Errors swallowed and logged while tests stay green |
 | New exceptions recorded on spans | −10 first, −5 each more (max −15) | Same, seen through traces |
 | Traced operations ≥2× slower (and ≥5 ms) | −10 each (max −20) | Performance regressions |
 | App metrics that at least doubled in the same test (and grew by ≥3), or new error-like counters | −10 first, −5 each more (max −20) | The same test doing much more work (e.g. repeated queries), or failures now being counted |
