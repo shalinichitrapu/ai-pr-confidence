@@ -181,14 +181,21 @@ def _outside_imports() -> List[str]:
     if not repo or not workdir:
         return []
     repo, workdir = os.path.realpath(repo), os.path.realpath(workdir)
+    # Installed packages are not the project's code, even when the virtual
+    # environment lives inside the repository (e.g. .venv/).
+    envs = {os.path.realpath(p) + os.sep for p in (sys.prefix, sys.base_prefix, sys.exec_prefix)}
     found = set()
     for module in list(sys.modules.values()):
         path = getattr(module, "__file__", None)
         if not path:
             continue
         path = os.path.realpath(path)
-        if path.startswith(repo + os.sep) and not path.startswith(workdir + os.sep):
-            found.add(os.path.relpath(path, repo))
+        if not path.startswith(repo + os.sep) or path.startswith(workdir + os.sep):
+            continue
+        parts = path.split(os.sep)
+        if any(path.startswith(env) for env in envs) or "site-packages" in parts or "dist-packages" in parts:
+            continue
+        found.add(os.path.relpath(path, repo))
     return sorted(found)
 
 
