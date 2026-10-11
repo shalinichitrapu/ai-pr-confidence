@@ -23,7 +23,7 @@ def parse_args(argv=None):
     p.add_argument("--repo", default=".", help="path to the git repository (default: .)")
     p.add_argument("--base", default="main", help="branch or commit the change targets (default: main)")
     p.add_argument("--head", default="HEAD", help="branch or commit with the change (default: HEAD)")
-    p.add_argument("--source", default=".", help="package/folder to measure coverage for; changed files outside it are not coverage-checked")
+    p.add_argument("--source", default=".", help="package/folder to measure coverage for (comma-separate several); changed files outside it are not coverage-checked")
     p.add_argument("--tests", default="tests", help="test folder (default: tests)")
     p.add_argument("--out", default="confidence-report", help="folder for report.md and result.json")
     p.add_argument("--no-memory", action="store_true",

@@ -32,6 +32,6 @@ jobs:
           python -m confidence_agent \
             --base origin/${{ github.base_ref }} \
             --head ${{ github.event.pull_request.head.sha }} \
-            --source studybuddy \
+            --source studybuddy,confidence_agent \
             --no-llm \
             --post-to-pr ${{ github.event.pull_request.number }}

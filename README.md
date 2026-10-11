@@ -62,7 +62,7 @@ the agent compares what one test recorded in each run:
 - **Histograms:** the mean of the recorded values.
 
 A counter is "error-like" if its name or an attribute value contains error,
-fail, invalid, exception, retry, timeout or reject. A new one of those in a test
+fail, invalid, exception, retry/retries, timeout or reject. A new one of those in a test
 that already existed is flagged, even without a before value to compare.
 
 ## Install
@@ -90,6 +90,7 @@ confidence-agent --base main --head my-branch --source my_package --no-llm
 - `--base`: the branch the change is going into.
 - `--head`: the branch (or commit) with the change. Defaults to your current checkout.
 - `--source`: the folder whose coverage you care about, usually your package.
+  Separate several with commas (`--source app,lib`).
   Changed files outside it (e.g. `setup.py` or scripts) aren't checked for coverage.
 - `--tests`: your test folder, if it isn't `tests`.
 
@@ -310,6 +311,21 @@ confidence-agent [--repo .] [--base main] [--head HEAD]
 ```
 
 `--min-score 60` makes the command exit non-zero below 60, so it can gate merges.
+
+## Developing the agent
+
+The agent's own tests are in `tests/agent/`. They cover how signals are
+computed and how they are scored. The demo app's tests are the rest of `tests/`.
+
+```bash
+pip install -e .
+pytest tests/agent      # the agent
+pytest tests            # the agent and the demo app
+```
+
+This repository scores its own pull requests. The workflow measures coverage
+for both `studybuddy` and `confidence_agent`, so a change to the agent loses
+points if its new code isn't tested.
 
 ## Limitations and next steps
 
