@@ -32,6 +32,7 @@ class RunResult:
     otel_metrics_enabled: bool = False
     # Files the tests imported from the user's repository instead of this checkout.
     outside_imports: List[str] = field(default_factory=list)
+    rerun: Dict[str, str] = field(default_factory=dict)  # test id -> outcome when run again
     exit_code: int = 0
     output_tail: str = ""
 
@@ -74,6 +75,40 @@ def _import_paths(workdir: Path) -> List[str]:
     if (workdir / "src").is_dir():
         paths.insert(0, str(workdir / "src"))
     return paths
+
+
+def _node_id(workdir: Path, test_id: str) -> str:
+    """JUnit's "tests.test_a.TestX::test_f" -> pytest's "tests/test_a.py::TestX::test_f".
+
+    The class name is a dotted path; the longest prefix that is a .py file in the
+    checkout is the module, and the rest are classes.
+    """
+    classname, _, name = test_id.rpartition("::")
+    parts = classname.split(".")
+    for i in range(len(parts), 0, -1):
+        path = "/".join(parts[:i]) + ".py"
+        if (workdir / path).is_file():
+            return "::".join([path, *parts[i:], name])
+    return test_id
+
+
+def rerun_tests(workdir: Path, test_ids: List[str]) -> Dict[str, str]:
+    """Run some tests once more, plainly (no coverage or telemetry), and return their outcomes."""
+    if not test_ids:
+        return {}
+    scratch = Path(tempfile.mkdtemp(prefix="confidence-rerun-"))
+    junit = scratch / "junit.xml"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (*_import_paths(workdir), env.get("PYTHONPATH", "")) if p)
+    env.pop("PYTEST_ADDOPTS", None)
+    cmd = [sys.executable, "-m", "pytest", *[_node_id(workdir, t) for t in test_ids], "-q",
+           f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider"]
+    if importlib.util.find_spec("xdist") is not None:
+        cmd += ["-n", "0"]
+    subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
+    outcomes, _ = _parse_junit(junit)
+    shutil.rmtree(scratch, ignore_errors=True)
+    return {t: outcomes[t] for t in test_ids if t in outcomes}
 
 
 def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_memory: bool = True,

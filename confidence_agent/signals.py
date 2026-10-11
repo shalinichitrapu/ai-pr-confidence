@@ -28,6 +28,7 @@ class Signals:
     tests_newly_failing: List[str] = field(default_factory=list)
     tests_removed: List[str] = field(default_factory=list)
     tests_added: List[str] = field(default_factory=list)
+    tests_flaky: List[str] = field(default_factory=list)  # newly failed, then passed on a rerun
     tests_moved: Dict[str, str] = field(default_factory=dict)  # old id -> new id, same test name
 
     changed_code_lines: int = 0  # executable non-test lines added or modified
@@ -244,9 +245,10 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         s.hidden_code["errors silenced without a trace"] = silenced
 
     s.tests_total = len(head.tests)
-    s.tests_failed = head.failed
     base_failed = set(base.failed)
-    s.tests_newly_failing = [t for t in head.failed if t not in base_failed]
+    s.tests_flaky = [t for t in head.failed if t not in base_failed and head.rerun.get(t) == "passed"]
+    s.tests_failed = [t for t in head.failed if t not in s.tests_flaky]
+    s.tests_newly_failing = [t for t in s.tests_failed if t not in base_failed]
     removed = sorted(set(base.tests) - set(head.tests))
     s.tests_added = sorted(set(head.tests) - set(base.tests))
     # A test counts as moved only when git saw its file renamed and the test kept

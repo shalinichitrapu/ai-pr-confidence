@@ -69,6 +69,13 @@ def main(argv=None) -> int:
             runs[label] = runner.run_tests(
                 wt, label, args.source, args.tests, track_memory=not args.no_memory, repo=repo
             )
+            if label == "head":
+                # Rerun tests that newly fail once, so one flaky test can't sink the score.
+                base_failed = set(runs["base"].failed)
+                newly = [t for t in runs["head"].failed if t not in base_failed]
+                if newly:
+                    print(f"[confidence] rerunning {len(newly)} newly failing test(s) to check for flakiness...")
+                    runs["head"].rerun = runner.rerun_tests(wt, newly)
             gitutil.remove_worktree(repo, wt)
     finally:
         for label in ("base", "head"):

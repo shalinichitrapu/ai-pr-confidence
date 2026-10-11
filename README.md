@@ -40,6 +40,7 @@ automatic first check worth having. It doesn't replace code review.
 | Signal | Deduction | Why it matters |
 |---|---|---|
 | Tests that newly fail | −45 first, −5 each more (max −55), so the score is always Low | The change broke behavior |
+| Tests that newly fail, then pass when rerun once | −5 (flaky, or made flaky by this change) | One flaky test shouldn't sink an unrelated change |
 | No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
 | Tests removed | −15 (a test whose file was renamed, keeping its name, counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
@@ -158,6 +159,7 @@ memory_min_delta_mb = 5.0
 
 [tool.confidence.weights]      # [first finding, each additional, maximum]
 tests_failing = [45, 5, 55]
+tests_flaky = [5, 0, 5]
 no_tests = [50, 0, 50]
 tests_removed = [15, 0, 15]
 coverage = [30, 0, 30]         # proportional: the maximum is what 0% coverage costs

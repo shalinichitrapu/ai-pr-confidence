@@ -53,6 +53,9 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     if signals.tests_failed and not signals.tests_newly_failing:
         details += ["**Tests that failed before and after this change**",
                     *[f"- `{t}`" for t in signals.tests_failed], ""]
+    if signals.tests_flaky:
+        details += ["**Flaky tests** (failed, then passed when run again)",
+                    *[f"- `{t}`" for t in signals.tests_flaky], ""]
     if signals.tests_moved:
         details += ["**Tests moved, not removed** (git detected the file rename)",
                     *[f"- `{a}` → `{b}`" for a, b in signals.tests_moved.items()], ""]
