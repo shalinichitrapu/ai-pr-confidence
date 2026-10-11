@@ -95,8 +95,10 @@ def score(s: Signals) -> Score:
             passed.append("No memory growth in tests")
 
     # 5. Reviewability
-    if s.diff_lines > LARGE_DIFF_LINES:
-        deductions.append(("Size", 5, f"Large change ({s.diff_lines} lines) is harder to review"))
+    if s.code_diff_lines > LARGE_DIFF_LINES:
+        deductions.append(
+            ("Size", 5, f"Large change ({s.code_diff_lines} lines, not counting tests) is harder to review")
+        )
 
     value = max(0, 100 - sum(p for _, p, _ in deductions))
     band = "High" if value >= HIGH else "Medium" if value >= MEDIUM else "Low"

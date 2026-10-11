@@ -55,6 +55,10 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     if signals.new_span_exceptions:
         details += ["**New exceptions on spans**",
                     *[f"- `{k}` × {v}" for k, v in signals.new_span_exceptions.items()], ""]
+    if signals.new_test_error_logs or signals.new_test_span_exceptions:
+        details += ["**Errors seen only in tests this change adds** (not scored; check they're expected)",
+                    *[f"- log `{k}` × {v}" for k, v in signals.new_test_error_logs.items()],
+                    *[f"- span `{k}` × {v}" for k, v in signals.new_test_span_exceptions.items()], ""]
     if signals.latency_regressions:
         details += ["**Latency regressions** (median span duration)",
                     *[f"- `{k}`: {v['before_ms']} ms → {v['after_ms']} ms" for k, v in signals.latency_regressions.items()], ""]

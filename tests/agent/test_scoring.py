@@ -101,14 +101,14 @@ def test_memory_costs_10_per_test_up_to_20():
 
 
 def test_large_diff_costs_5():
-    assert points(score(clean(diff_lines=401)), "Size") == 5
-    assert points(score(clean(diff_lines=400)), "Size") == 0
+    assert points(score(clean(code_diff_lines=401)), "Size") == 5
+    assert points(score(clean(code_diff_lines=400)), "Size") == 0
 
 
 def test_bands():
     assert score(clean(new_error_logs={"a": 1})).band == "High"  # 85
     assert score(clean(tests_newly_failing=["a"])).band == "Medium"  # 60
-    assert score(clean(tests_newly_failing=["a"], diff_lines=500)).band == "Low"  # 55
+    assert score(clean(tests_newly_failing=["a"], code_diff_lines=500)).band == "Low"  # 55
 
 
 def test_score_never_goes_below_zero():

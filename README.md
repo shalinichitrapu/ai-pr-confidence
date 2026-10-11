@@ -42,9 +42,14 @@ turns the difference into a score a reviewer can act on.
 | Traced operations ≥2× slower (and ≥5 ms) | −10 each (max −20) | Performance regressions |
 | App metrics that at least doubled in the same test (and grew by ≥3), or new error-like counters | −10 first, −5 each more (max −20) | The same test doing much more work (e.g. repeated queries), or failures now being counted |
 | Tests whose peak memory at least doubled (and grew by ≥5 MB) | −10 each (max −20) | Leaks, unbounded caches, loading too much at once |
-| Very large diff (>400 lines) | −5 | Harder to review |
+| Very large diff (>400 lines, not counting test files) | −5 | Harder to review |
 
 Bands: **High** ≥ 85, **Medium** 60–84, **Low** < 60.
+
+Logs, exceptions on spans and latency are scored only for tests that exist both
+before and after the change, because those ran the same inputs. Errors that
+appear only in tests the change adds (often tests of error handling) are listed
+in the report but not scored.
 
 4. Optionally, a **local model** (Ollama) writes a 2–4 bullet summary of the
    evidence. The model never changes the score, so the number is deterministic
