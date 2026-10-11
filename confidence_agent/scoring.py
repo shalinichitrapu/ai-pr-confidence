@@ -34,10 +34,16 @@ def score(s: Signals) -> Score:
     deductions: List[Tuple[str, int, str]] = []
     passed: List[str] = []
 
-    # 1. Tests
-    if s.tests_newly_failing:
-        pts = _tiered(len(s.tests_newly_failing), 40, 5, 50)
+    # 1. Tests. A newly failing test alone takes the score below Medium (60).
+    if s.tests_total == 0:
+        deductions.append(("Tests", 50, "No test results: tests didn't run or couldn't be collected"))
+    elif s.tests_newly_failing:
+        pts = _tiered(len(s.tests_newly_failing), 45, 5, 55)
         deductions.append(("Tests", pts, f"{len(s.tests_newly_failing)} test(s) fail that passed before"))
+    elif s.tests_failed:
+        passed.append(
+            f"No test newly fails ({len(s.tests_failed)} of {s.tests_total} already failed before this change)"
+        )
     else:
         passed.append(f"All {s.tests_total} tests pass")
     if s.tests_removed:
@@ -103,8 +109,10 @@ def score(s: Signals) -> Score:
             passed.append("No memory growth in tests")
 
     # 6. Reviewability
-    if s.diff_lines > LARGE_DIFF_LINES:
-        deductions.append(("Size", 5, f"Large change ({s.diff_lines} lines) is harder to review"))
+    if s.code_diff_lines > LARGE_DIFF_LINES:
+        deductions.append(
+            ("Size", 5, f"Large change ({s.code_diff_lines} lines, not counting tests) is harder to review")
+        )
 
     value = max(0, 100 - sum(p for _, p, _ in deductions))
     band = "High" if value >= HIGH else "Medium" if value >= MEDIUM else "Low"

@@ -6,12 +6,14 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        # quotePath=false: print non-ASCII file names as-is instead of quoted escapes.
+        ["git", "-C", str(repo), "-c", "core.quotePath=false", *args],
+        check=True, capture_output=True, text=True,
     ).stdout
 
 
@@ -38,6 +40,7 @@ def remove_worktree(repo: Path, path: Path) -> None:
 class Diff:
     added_lines: Dict[str, Set[int]] = field(default_factory=dict)
     files_changed: List[str] = field(default_factory=list)
+    file_lines: Dict[str, int] = field(default_factory=dict)  # path -> lines added + removed
     lines_added: int = 0
     lines_removed: int = 0
     added_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> added lines
@@ -51,15 +54,34 @@ class Diff:
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
+def _numstat(repo: Path, base: str, head: str) -> List[Tuple[str, str, str]]:
+    """(added, removed, path) per file; "-" counts for binary files.
+
+    Uses -z so a renamed file reports its new path rather than git's
+    display form "dir/{old => new}".
+    """
+    fields = git(repo, "diff", "--numstat", "-z", base, head).split("\0")
+    out, i = [], 0
+    while i < len(fields) and fields[i]:
+        added, removed, path = fields[i].split("\t", 2)
+        if path:
+            i += 1
+        else:  # rename or copy: old and new paths follow as separate fields
+            path = fields[i + 2]
+            i += 3
+        out.append((added, removed, path))
+    return out
+
+
 def read_diff(repo: Path, base: str, head: str) -> Diff:
     """Parse `git diff base head` into the new-side line numbers that were added."""
     diff = Diff()
-    for line in git(repo, "diff", "--numstat", base, head).splitlines():
-        added, removed, path = line.split("\t", 2)
+    for added, removed, path in _numstat(repo, base, head):
         diff.files_changed.append(path)
         if added != "-":
             diff.lines_added += int(added)
             diff.lines_removed += int(removed)
+            diff.file_lines[path] = int(added) + int(removed)
 
     current = old = None
     in_header = False
@@ -67,12 +89,13 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
         if line.startswith("diff --git "):
             in_header, current, old = True, None, None
             continue
+        # git appends a tab after file names with spaces
         if in_header and line.startswith("--- "):
-            source = line[4:]
+            source = line[4:].rstrip("\t")
             old = source[2:] if source.startswith("a/") else None
             continue
         if in_header and line.startswith("+++ "):
-            target = line[4:]
+            target = line[4:].rstrip("\t")
             current = target[2:] if target.startswith("b/") else None
             if current:
                 diff.added_lines.setdefault(current, set())

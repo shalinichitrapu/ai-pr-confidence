@@ -31,6 +31,9 @@ def _num(x) -> str:
 def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str]) -> str:
     md = [MARKER, f"## {ICON[score.band]} AI change confidence: **{score.value}/100 ({score.band})**", ""]
 
+    for warning in signals.warnings:
+        md += [f"> ⚠️ **Results may be unreliable.** {warning}", ""]
+
     if summary:
         md += ["**Summary** _(written by a local model from the evidence below; it does not affect the score)_", "", summary, ""]
 
@@ -44,6 +47,12 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     details = []
     if signals.tests_newly_failing:
         details += ["**Newly failing tests**", *[f"- `{t}`" for t in signals.tests_newly_failing], ""]
+    if signals.tests_failed and not signals.tests_newly_failing:
+        details += ["**Tests that failed before and after this change**",
+                    *[f"- `{t}`" for t in signals.tests_failed], ""]
+    if signals.tests_moved:
+        details += ["**Tests moved, not removed** (same name, new module)",
+                    *[f"- `{a}` → `{b}`" for a, b in signals.tests_moved.items()], ""]
     if signals.tests_removed:
         details += ["**Tests removed by this change**", *[f"- `{t}`" for t in signals.tests_removed], ""]
     if signals.uncovered_changes:
@@ -55,6 +64,10 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     if signals.new_span_exceptions:
         details += ["**New exceptions on spans**",
                     *[f"- `{k}` × {v}" for k, v in signals.new_span_exceptions.items()], ""]
+    if signals.new_test_error_logs or signals.new_test_span_exceptions:
+        details += ["**Errors seen only in tests this change adds** (not scored; check they're expected)",
+                    *[f"- log `{k}` × {v}" for k, v in signals.new_test_error_logs.items()],
+                    *[f"- span `{k}` × {v}" for k, v in signals.new_test_span_exceptions.items()], ""]
     if signals.latency_regressions:
         details += ["**Latency regressions** (median span duration)",
                     *[f"- `{k}`: {v['before_ms']} ms → {v['after_ms']} ms" for k, v in signals.latency_regressions.items()], ""]
@@ -79,6 +92,7 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     md.append(
         f"<sub>Compared `{head_sha[:7]}` against merge base `{base_sha[:7]}` · "
         f"{signals.tests_total} tests · {signals.diff_lines} lines changed · "
-        "score is deterministic: tests, changed-line coverage, logs, traces, latency, metrics, memory</sub>"
+        "scored from tests, changed-line coverage, logs, traces, metrics, latency and memory, not by a model; "
+        "latency and memory are single-run measurements</sub>"
     )
     return "\n".join(md)

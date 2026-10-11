@@ -24,6 +24,11 @@ show up in a code review. This agent runs the code before and after the change
 with OpenTelemetry tracing and log capture turned on, compares the two, and
 turns the difference into a score a reviewer can act on.
 
+Nothing in the scoring is specific to AI: it works on any change, whoever wrote
+it. It's aimed at AI-written changes because the problems it looks for are ones
+AI tools often produce, and because the number of changes they produce makes an
+automatic first check worth having. It doesn't replace code review.
+
 ## How it works
 
 1. Find the merge base of the PR and check out **before** and **after** snapshots (git worktrees).
@@ -34,8 +39,9 @@ turns the difference into a score a reviewer can act on.
 
 | Signal | Deduction | Why it matters |
 |---|---|---|
-| Tests that newly fail | −40 first, −5 each more (max −50) | The change broke behavior |
-| Tests removed | −15 | AI tools sometimes delete the failing test |
+| Tests that newly fail | −45 first, −5 each more (max −55), so the score is always Low | The change broke behavior |
+| No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
+| Tests removed | −15 (a test with the same name in another module counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
 | Code hidden from these checks: new `# pragma: no cover`, or error logging, tracing or metric instruments removed (net, so moved code doesn't count) | −10 per kind (max −20) | Hiding code from coverage or telemetry raises the score without making the code safer |
 | New ERROR log signatures | −15 first, −5 each more (max −20) | Errors swallowed and logged while tests stay green |
@@ -43,13 +49,20 @@ turns the difference into a score a reviewer can act on.
 | Traced operations ≥2× slower (and ≥5 ms) | −10 each (max −20) | Performance regressions |
 | App metrics that at least doubled in the same test (and grew by ≥3), or new error-like counters | −10 first, −5 each more (max −20) | The same test doing much more work (e.g. repeated queries), or failures now being counted |
 | Tests whose peak memory at least doubled (and grew by ≥5 MB) | −10 each (max −20) | Leaks, unbounded caches, loading too much at once |
-| Very large diff (>400 lines) | −5 | Harder to review |
+| Very large diff (>400 lines, not counting test files) | −5 | Harder to review |
 
 Bands: **High** ≥ 85, **Medium** 60–84, **Low** < 60.
 
+Logs, exceptions on spans and latency are scored only for tests that exist both
+before and after the change, because those ran the same inputs. Errors that
+appear only in tests the change adds (often tests of error handling) are listed
+in the report but not scored.
+
 4. Optionally, a **local model** (Ollama) writes a 2–4 bullet summary of the
-   evidence. The model never changes the score, so the number is deterministic
-   and every point is explained.
+   evidence. The model never changes the score, and every point is explained.
+   Tests, coverage, logs and metrics give the same result every time for the same
+   code. Latency and memory come from a single measured run, so they can vary a
+   little between runs.
 
 The app being tested only needs the OpenTelemetry **API**. The agent supplies the
 SDK at test time, so no changes to the target project are required.
@@ -107,6 +120,15 @@ memory signals. If your code already uses the OpenTelemetry API, you also get:
 
 Peak-memory tracking makes tests run roughly 2–3× slower. Pass `--no-memory` to skip it.
 
+**Installed projects and `src/` layouts.** The agent puts each checkout (and its
+`src/` folder, if there is one) first on the import path, so tests import the
+version being scored even if the project is installed with `pip install -e`. If
+tests still import files from your working copy, the report shows a warning that
+the results may be unreliable.
+
+**Parallel tests.** If your pytest config uses pytest-xdist (`-n`), the agent runs
+tests in a single process. Coverage and telemetry can't see parallel workers.
+
 ## Add it to your GitHub pull requests
 
 To score every pull request and post the result as a comment, add this file to
@@ -149,10 +171,18 @@ jobs:
             --source my_package \
             --no-llm \
             --post-to-pr ${{ github.event.pull_request.number }}
+
+      - name: Add report to job summary
+        if: always()
+        run: cat confidence-report/report.md >> "$GITHUB_STEP_SUMMARY" || true
 ```
 
 The agent posts a single comment and updates it on each new push. Add
 `--min-score 60` to fail the check below 60, so you can make it required before merging.
+
+Pull requests from forks get a read-only token, so GitHub refuses the comment.
+The agent prints a warning instead of failing, and the report still appears on
+the run's summary page.
 
 GitHub's servers can't reach a model on your own network, so CI comments have no
 summary. To add one to a pull request's comment, run the agent from your own
@@ -333,9 +363,18 @@ points if its new code isn't tested.
 - Python + pytest only for now; the signal and scoring layers are language-agnostic.
 - Telemetry comes from test runs, so it only sees code paths tests exercise.
   Next: replay recorded production traffic, or score canary deployments with the same signals.
-- Weights are hand-tuned. Next: label a set of real AI-generated PRs
-  (merged cleanly vs. reverted or caused incidents) and fit weights to them.
+- **Weights and thresholds were picked by hand** while building the demo, and
+  haven't been checked against real codebases yet. They're constants at the top of
+  `confidence_agent/signals.py` and `confidence_agent/scoring.py`. Next: score real
+  past PRs (merged cleanly vs. reverted or caused incidents) and fit the weights to
+  those outcomes.
 - Latency comparison uses medians from a single run; repeated runs would cut noise.
 - Metric thresholds (2× and +3) ignore units, and a metric that grows because of a
   wanted feature is still flagged. Read metric deductions as "look here", not "this is a bug".
 - `tracemalloc` only sees memory Python allocates; some native libraries' memory isn't counted.
+- **Cost:** the test suite runs twice (before and after), under coverage, and memory
+  tracking makes it roughly 2–3× slower again. Use `--no-memory` for large suites.
+- **It can be worked around.** A change written to score well, rather than to be
+  correct, can avoid the checks: for example by testing only the happy path, or by
+  handling errors without logging them. A High score means no warning signs were
+  found, not that the change is correct.
