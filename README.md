@@ -34,8 +34,9 @@ turns the difference into a score a reviewer can act on.
 
 | Signal | Deduction | Why it matters |
 |---|---|---|
-| Tests that newly fail | −40 first, −5 each more (max −50) | The change broke behavior |
-| Tests removed | −15 | AI tools sometimes delete the failing test |
+| Tests that newly fail | −45 first, −5 each more (max −55), so the score is always Low | The change broke behavior |
+| No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
+| Tests removed | −15 (a test with the same name in another module counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
 | New ERROR log signatures | −15 first, −5 each more (max −20) | Errors swallowed and logged while tests stay green |
 | New exceptions recorded on spans | −10 first, −5 each more (max −15) | Same, seen through traces |
@@ -110,6 +111,15 @@ memory signals. If your code already uses the OpenTelemetry API, you also get:
 - **Metrics:** counters, up-down counters, gauges and histograms compared per test.
 
 Peak-memory tracking makes tests run roughly 2–3× slower. Pass `--no-memory` to skip it.
+
+**Installed projects and `src/` layouts.** The agent puts each checkout (and its
+`src/` folder, if there is one) first on the import path, so tests import the
+version being scored even if the project is installed with `pip install -e`. If
+tests still import files from your working copy, the report shows a warning that
+the results may be unreliable.
+
+**Parallel tests.** If your pytest config uses pytest-xdist (`-n`), the agent runs
+tests in a single process. Coverage and telemetry can't see parallel workers.
 
 ## Add it to your GitHub pull requests
 

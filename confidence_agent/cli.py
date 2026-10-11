@@ -55,7 +55,9 @@ def main(argv=None) -> int:
             wt = tmp / label
             gitutil.add_worktree(repo, sha, wt)
             print(f"[confidence] running tests on {label}...")
-            runs[label] = runner.run_tests(wt, label, args.source, args.tests, track_memory=not args.no_memory)
+            runs[label] = runner.run_tests(
+                wt, label, args.source, args.tests, track_memory=not args.no_memory, repo=repo
+            )
             gitutil.remove_worktree(repo, wt)
     finally:
         for label in ("base", "head"):
@@ -65,6 +67,8 @@ def main(argv=None) -> int:
         print("[confidence] no test results from head run. pytest output:\n" + runs["head"].output_tail)
 
     sig = signals.compute(runs["base"], runs["head"], diff, args.tests, args.source)
+    for warning in sig.warnings:
+        print(f"[confidence] WARNING: {warning}")
     result = scoring.score(sig)
     print(f"[confidence] score {result.value}/100 ({result.band})")
 

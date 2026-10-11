@@ -34,6 +34,7 @@ class Signals:
     tests_newly_failing: List[str] = field(default_factory=list)
     tests_removed: List[str] = field(default_factory=list)
     tests_added: List[str] = field(default_factory=list)
+    tests_moved: Dict[str, str] = field(default_factory=dict)  # old id -> new id, same test name
 
     changed_code_lines: int = 0  # executable non-test lines added or modified
     changed_lines_covered: int = 0
@@ -56,6 +57,7 @@ class Signals:
     otel_enabled: bool = False
     metrics_enabled: bool = False
     memory_enabled: bool = False
+    warnings: List[str] = field(default_factory=list)  # reasons the evidence may be unreliable
 
     @property
     def changed_line_coverage(self) -> float:
@@ -166,8 +168,19 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     s.tests_failed = head.failed
     base_failed = set(base.failed)
     s.tests_newly_failing = [t for t in head.failed if t not in base_failed]
-    s.tests_removed = sorted(set(base.tests) - set(head.tests))
+    removed = sorted(set(base.tests) - set(head.tests))
     s.tests_added = sorted(set(head.tests) - set(base.tests))
+    # A test that disappears from one module and appears with the same name in
+    # another was moved (e.g. its file was renamed), not removed.
+    unclaimed = list(s.tests_added)
+    for old in removed:
+        name = old.rsplit("::", 1)[-1]
+        new = next((t for t in unclaimed if t.rsplit("::", 1)[-1] == name), None)
+        if new is None:
+            s.tests_removed.append(old)
+        else:
+            s.tests_moved[old] = new
+            unclaimed.remove(new)
 
     for path, added in diff.added_lines.items():
         if not path.endswith(".py") or _is_test_file(path, tests_path):
@@ -247,6 +260,16 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             s.memory_regressions[test] = {
                 "before_mb": round(before / 2**20, 1), "after_mb": round(after / 2**20, 1)
             }
+
+    for run in (base, head):
+        if run.outside_imports:
+            shown = ", ".join(f"`{p}`" for p in run.outside_imports[:3])
+            more = f" and {len(run.outside_imports) - 3} more" if len(run.outside_imports) > 3 else ""
+            s.warnings.append(
+                f"The {run.label} run imported {shown}{more} from your working copy instead of the "
+                f"{run.label} checkout, so it may not have tested the {run.label} version. "
+                "Check how the project is installed (e.g. `pip install -e`) and the test import path."
+            )
 
     s.diff_lines = diff.size
     s.code_diff_lines = sum(n for path, n in diff.file_lines.items() if not _is_test_file(path, tests_path))
