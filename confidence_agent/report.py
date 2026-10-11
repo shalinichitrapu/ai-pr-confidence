@@ -51,7 +51,7 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
         details += ["**Tests that failed before and after this change**",
                     *[f"- `{t}`" for t in signals.tests_failed], ""]
     if signals.tests_moved:
-        details += ["**Tests moved, not removed** (same name, new module)",
+        details += ["**Tests moved, not removed** (git detected the file rename)",
                     *[f"- `{a}` → `{b}`" for a, b in signals.tests_moved.items()], ""]
     if signals.tests_removed:
         details += ["**Tests removed by this change**", *[f"- `{t}`" for t in signals.tests_removed], ""]

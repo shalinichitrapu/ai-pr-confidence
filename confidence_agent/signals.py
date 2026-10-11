@@ -101,6 +101,21 @@ def _hidden_code(diff: Diff, tests_path: str) -> Dict[str, List[str]]:
     return found
 
 
+def _module(path: str) -> str:
+    """tests/test_a.py -> tests.test_a, the form JUnit uses for test class names."""
+    return path[:-3].replace("/", ".") if path.endswith(".py") else ""
+
+
+def _renamed_test_id(test_id: str, renamed: Dict[str, str]) -> Optional[str]:
+    """The id this test would have after its file's rename, if its file was renamed."""
+    classname, _, name = test_id.rpartition("::")
+    for new_path, old_path in renamed.items():
+        old_mod, new_mod = _module(old_path), _module(new_path)
+        if old_mod and (classname == old_mod or classname.startswith(old_mod + ".")):
+            return f"{new_mod}{classname[len(old_mod):]}::{name}"
+    return None
+
+
 def _is_test_file(path: str, tests_path: str) -> bool:
     name = path.rsplit("/", 1)[-1]
     return path.startswith(tests_path.rstrip("/") + "/") or name.startswith("test_") or name == "conftest.py"
@@ -201,17 +216,17 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     s.tests_newly_failing = [t for t in head.failed if t not in base_failed]
     removed = sorted(set(base.tests) - set(head.tests))
     s.tests_added = sorted(set(head.tests) - set(base.tests))
-    # A test that disappears from one module and appears with the same name in
-    # another was moved (e.g. its file was renamed), not removed.
-    unclaimed = list(s.tests_added)
+    # A test counts as moved only when git saw its file renamed and the test kept
+    # its class and name. Matching on the name alone would let a change delete a
+    # failing test and add a weaker one with the same name somewhere else.
+    added = set(s.tests_added)
     for old in removed:
-        name = old.rsplit("::", 1)[-1]
-        new = next((t for t in unclaimed if t.rsplit("::", 1)[-1] == name), None)
-        if new is None:
-            s.tests_removed.append(old)
-        else:
+        new = _renamed_test_id(old, diff.renamed)
+        if new in added:
             s.tests_moved[old] = new
-            unclaimed.remove(new)
+            added.discard(new)
+        else:
+            s.tests_removed.append(old)
 
     for path, added in diff.added_lines.items():
         if not path.endswith(".py") or _is_test_file(path, tests_path):
