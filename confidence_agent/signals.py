@@ -20,7 +20,7 @@ LATENCY_MIN_DELTA_MS = 5.0
 METRIC_RATIO = 2.0
 METRIC_MIN_DELTA = 3.0
 # Names or attribute values that mark a counter as counting failures.
-ERROR_LIKE = re.compile(r"error|fail|invalid|exception|retry|timeout|reject", re.IGNORECASE)
+ERROR_LIKE = re.compile(r"error|fail|invalid|exception|retry|retries|timeout|reject", re.IGNORECASE)
 
 # A test's peak memory must both double and grow by at least this much.
 MEMORY_RATIO = 2.0
@@ -71,15 +71,21 @@ def _is_test_file(path: str, tests_path: str) -> bool:
 
 
 def _in_source(path: str, source: str) -> bool:
-    """True if `path` is inside the --source folder or package coverage measured."""
-    src = source.strip().rstrip("/")
-    if src.startswith("./"):
-        src = src[2:]
-    if src in ("", "."):
-        return True
-    if "/" not in src:
-        src = src.replace(".", "/")  # dotted package name, e.g. my.pkg
-    return path == src or path.startswith(src + "/")
+    """True if `path` is inside a --source folder or package coverage measured.
+
+    Like coverage.py, `source` may list several, separated by commas.
+    """
+    for src in source.split(","):
+        src = src.strip().rstrip("/")
+        if src.startswith("./"):
+            src = src[2:]
+        if src in ("", "."):
+            return True
+        if "/" not in src:
+            src = src.replace(".", "/")  # dotted package name, e.g. my.pkg
+        if path == src or path.startswith(src + "/"):
+            return True
+    return False
 
 
 def _error_log_signatures(run: RunResult) -> Dict[str, int]:
