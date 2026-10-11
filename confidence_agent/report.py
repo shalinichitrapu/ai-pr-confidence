@@ -74,6 +74,7 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     md.append(
         f"<sub>Compared `{head_sha[:7]}` against merge base `{base_sha[:7]}` · "
         f"{signals.tests_total} tests · {signals.diff_lines} lines changed · "
-        "score is deterministic: tests, changed-line coverage, logs, traces, latency, metrics, memory</sub>"
+        "scored from tests, changed-line coverage, logs, traces, metrics, latency and memory, not by a model; "
+        "latency and memory are single-run measurements</sub>"
     )
     return "\n".join(md)
