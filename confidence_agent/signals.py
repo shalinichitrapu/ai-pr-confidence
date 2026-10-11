@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import statistics
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .gitutil import Diff
 from .runner import RunResult
@@ -43,12 +43,16 @@ class Signals:
     new_error_logs: Dict[str, int] = field(default_factory=dict)  # signature -> count
     new_span_exceptions: Dict[str, int] = field(default_factory=dict)
     latency_regressions: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # Seen only in tests this change added. Often a new test of an error path, so not scored.
+    new_test_error_logs: Dict[str, int] = field(default_factory=dict)
+    new_test_span_exceptions: Dict[str, int] = field(default_factory=dict)
     # series -> {"test", "kind", "before", "after"} for the test where it grew most
     metric_regressions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     new_error_metrics: Dict[str, float] = field(default_factory=dict)  # series -> total in head
     memory_regressions: Dict[str, Dict[str, float]] = field(default_factory=dict)  # test -> MB before/after
 
     diff_lines: int = 0
+    code_diff_lines: int = 0  # diff_lines without test files; what the size check uses
     files_changed: List[str] = field(default_factory=list)
     otel_enabled: bool = False
     metrics_enabled: bool = False
@@ -90,19 +94,28 @@ def _in_source(path: str, source: str) -> bool:
     return False
 
 
-def _error_log_signatures(run: RunResult) -> Dict[str, int]:
+Keep = Callable[[Optional[str]], bool]
+
+
+def _all(test: Optional[str]) -> bool:
+    return True
+
+
+def _error_log_signatures(run: RunResult, keep: Keep = _all) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for rec in run.logs:
-        if rec["level"] not in ("ERROR", "CRITICAL"):
+        if rec["level"] not in ("ERROR", "CRITICAL") or not keep(rec["test"]):
             continue
         sig = f"{rec['logger']} {rec['location']}: {rec['exc_type'] or rec['template']}"
         counts[sig] = counts.get(sig, 0) + 1
     return counts
 
 
-def _span_exception_signatures(run: RunResult) -> Dict[str, int]:
+def _span_exception_signatures(run: RunResult, keep: Keep = _all) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for span in run.spans:
+        if not keep(span["test"]):
+            continue
         for ev in span["events"]:
             if ev["name"] == "exception":
                 sig = f"{span['name']}: {ev['exc_type']}"
@@ -139,9 +152,11 @@ def _metric_values(run: RunResult) -> Dict[Tuple[str, str], Tuple[str, float]]:
     return out
 
 
-def _median_durations(run: RunResult) -> Dict[str, float]:
+def _median_durations(run: RunResult, keep: Keep = _all) -> Dict[str, float]:
     by_name: Dict[str, List[float]] = {}
     for span in run.spans:
+        if not keep(span["test"]):
+            continue
         by_name.setdefault(span["name"], []).append(span["duration_ms"])
     return {name: statistics.median(v) for name, v in by_name.items()}
 
@@ -188,12 +203,29 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         if changed - covered:
             s.uncovered_changes[path] = sorted(changed - covered)
 
-    base_logs, head_logs = _error_log_signatures(base), _error_log_signatures(head)
-    s.new_error_logs = {k: v for k, v in head_logs.items() if k not in base_logs}
-    base_exc, head_exc = _span_exception_signatures(base), _span_exception_signatures(head)
-    s.new_span_exceptions = {k: v for k, v in head_exc.items() if k not in base_exc}
+    # Runtime evidence is scored only for tests that exist before and after, so
+    # both runs saw the same inputs. Records outside any test (e.g. at import)
+    # count too. Adding a test of an error path must not cost points.
+    shared = set(base.node_ids) & set(head.node_ids)
 
-    base_lat, head_lat = _median_durations(base), _median_durations(head)
+    def in_shared(test: Optional[str]) -> bool:
+        return test is None or test in shared
+
+    def in_new(test: Optional[str]) -> bool:
+        return test is not None and test not in shared
+
+    base_logs = _error_log_signatures(base)
+    s.new_error_logs = {k: v for k, v in _error_log_signatures(head, in_shared).items() if k not in base_logs}
+    s.new_test_error_logs = {k: v for k, v in _error_log_signatures(head, in_new).items() if k not in base_logs}
+    base_exc = _span_exception_signatures(base)
+    s.new_span_exceptions = {
+        k: v for k, v in _span_exception_signatures(head, in_shared).items() if k not in base_exc
+    }
+    s.new_test_span_exceptions = {
+        k: v for k, v in _span_exception_signatures(head, in_new).items() if k not in base_exc
+    }
+
+    base_lat, head_lat = _median_durations(base, in_shared), _median_durations(head, in_shared)
     for name, after in head_lat.items():
         before = base_lat.get(name)
         if before is None:
@@ -240,5 +272,6 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             )
 
     s.diff_lines = diff.size
+    s.code_diff_lines = sum(n for path, n in diff.file_lines.items() if not _is_test_file(path, tests_path))
     s.files_changed = diff.files_changed
     return s

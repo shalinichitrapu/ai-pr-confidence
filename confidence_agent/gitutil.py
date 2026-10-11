@@ -38,6 +38,7 @@ def remove_worktree(repo: Path, path: Path) -> None:
 class Diff:
     added_lines: Dict[str, Set[int]] = field(default_factory=dict)
     files_changed: List[str] = field(default_factory=list)
+    file_lines: Dict[str, int] = field(default_factory=dict)  # path -> lines added + removed
     lines_added: int = 0
     lines_removed: int = 0
 
@@ -58,6 +59,7 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
         if added != "-":
             diff.lines_added += int(added)
             diff.lines_removed += int(removed)
+            diff.file_lines[path] = int(added) + int(removed)
 
     current = None
     for line in git(repo, "diff", "--unified=0", "--no-color", base, head).splitlines():
