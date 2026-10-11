@@ -129,6 +129,12 @@ memory signals. If your code already uses the OpenTelemetry API, you also get:
 
 Peak-memory tracking makes tests run roughly 2–3× slower. Pass `--no-memory` to skip it.
 
+**Base-run cache.** The base branch's results are saved in `~/.cache/confidence-agent`
+and reused by later runs against the same commit, keyed by the commit, `--source`,
+`--tests`, memory tracking, the Python version, installed packages and the agent's
+own version. Anything different means a fresh run. `--cache-dir` moves it and
+`--no-cache` turns it off.
+
 **Installed projects and `src/` layouts.** The agent puts each checkout (and its
 `src/` folder, if there is one) first on the import path, so tests import the
 version being scored even if the project is installed with `pip install -e`. If
@@ -226,6 +232,13 @@ jobs:
 
       - run: pip install -r requirements.txt # your project's dependencies
       - run: pip install git+https://github.com/shalinichitrapu/ai-pr-confidence.git
+
+      - name: Reuse base-branch test results between runs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/confidence-agent
+          key: confidence-base-${{ runner.os }}-${{ github.event.pull_request.base.sha }}
+          restore-keys: confidence-base-${{ runner.os }}-
 
       - name: Score this pull request
         env:
