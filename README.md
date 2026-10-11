@@ -442,6 +442,28 @@ confidence-agent [--repo .] [--base main] [--head HEAD]
 
 `--min-score 60` makes the command exit non-zero below 60, so it can gate merges.
 
+## Checking the score against outcomes
+
+`confidence-calibrate` scores a project's recent changes and compares the scores
+with what happened to them:
+
+```bash
+confidence-calibrate --repo . --branch main --limit 30 --source my_package
+```
+
+It scores each merge commit on the branch (or each commit, if the project
+squash-merges) and marks the ones that were later reverted, using git's own "This
+reverts commit …" messages. For outcomes git can't see, such as incidents or
+hotfixes, pass `--outcomes outcomes.csv` with `sha,bad` or `sha,good` rows.
+
+`confidence-calibration/calibration.md` shows:
+- **Revert rate by band:** a useful score has a higher rate in Low than in High.
+- **Lift per deduction:** how much more often changes with that deduction went bad.
+  This is the evidence for tuning `[tool.confidence.weights]`.
+
+Memory tracking and mutation testing are off by default here, for speed; `--full`
+turns them on. With only a few bad outcomes, the numbers are a direction, not a fit.
+
 ## Developing the agent
 
 The agent's own tests are in `tests/agent/`. They cover how signals are

@@ -21,6 +21,7 @@ Homepage = "https://github.com/shalinichitrapu/ai-pr-confidence"
 
 [project.scripts]
 confidence-agent = "confidence_agent.cli:main"
+confidence-calibrate = "confidence_agent.calibrate:main"
 
 [tool.setuptools]
 packages = ["confidence_agent"]
