@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .config import Config
 from .expectations import expects_exception, node_file
 from .gitutil import Diff
+from .review_scope import risky_code, unmeasured
 from .swallow import silent_excepts
 from .runner import RunResult
 
@@ -30,6 +31,9 @@ class Signals:
     tests_added: List[str] = field(default_factory=list)
     mutants_tested: int = 0  # mutants that ran (killed + survived)
     mutants_survived: List[str] = field(default_factory=list)  # changes no covering test noticed
+    dependency_changes: List[str] = field(default_factory=list)  # added or changed packages
+    risky_code: List[str] = field(default_factory=list)  # security-sensitive calls on changed lines
+    unmeasured_files: List[str] = field(default_factory=list)  # config/data files tests can't exercise
     tests_flaky: List[str] = field(default_factory=list)  # newly failed, then passed on a rerun
     tests_moved: Dict[str, str] = field(default_factory=dict)  # old id -> new id, same test name
 
@@ -241,6 +245,7 @@ def _without_ignored(diff: Diff, cfg: Config) -> Tuple[Diff, List[str]]:
         added_text=keep(diff.added_text),
         removed_text=keep(diff.removed_text),
         head_source=keep(diff.head_source),
+        dependency_changes=[c for c in diff.dependency_changes if not cfg.ignored(c.split(":", 1)[0])],
     )
     return kept, ignored
 
@@ -263,6 +268,20 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     ]
     if silenced:
         s.hidden_code["errors silenced without a trace"] = silenced
+
+    s.dependency_changes = list(diff.dependency_changes)
+    s.risky_code = [
+        finding
+        for path, text in diff.head_source.items()
+        if not _is_test_file(path, tests_path)
+        for finding in risky_code(path, text, diff.added_lines.get(path, ()))
+    ]
+    s.unmeasured_files = unmeasured(diff.files_changed)
+    if s.unmeasured_files and not any(p.endswith(".py") for p in diff.files_changed):
+        s.warnings.append(
+            "This change only touches files the tests can't exercise (configuration, data, CI or "
+            "infrastructure), so the score says little about it. Review those files directly."
+        )
 
     s.tests_total = len(head.tests)
     base_failed = set(base.failed)

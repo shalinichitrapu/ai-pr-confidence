@@ -67,6 +67,8 @@ class Weights:
     metrics: Tier = Tier(10, 5, 20)
     memory: Tier = Tier(10, 10, 20)
     size: Tier = Tier(5, 0, 5)
+    dependencies: Tier = Tier(5, 0, 5)
+    security: Tier = Tier(10, 10, 20)
     mutation: Tier = Tier(15, 0, 15)  # proportional: cap is what "no test noticed any mutant" costs
 
 

@@ -98,6 +98,13 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
         for kind, lines in signals.hidden_code.items():
             details += [f"- {kind}:", *[f"  - `{line}`" for line in lines[:5]]]
         details.append("")
+    if signals.risky_code:
+        details += ["**Security-sensitive code on changed lines**", *[f"- `{f}`" for f in signals.risky_code], ""]
+    if signals.dependency_changes:
+        details += ["**Dependencies added or changed**", *[f"- `{c}`" for c in signals.dependency_changes], ""]
+    if signals.unmeasured_files:
+        details += ["**Changed files the tests can't exercise** (config, data, CI; review directly)",
+                    *[f"- `{p}`" for p in signals.unmeasured_files], ""]
     if signals.expected_errors:
         details += ["**Expected errors** (listed in `[tool.confidence] expected_errors`, not scored)",
                     *[f"- `{k}` × {v}" for k, v in signals.expected_errors.items()], ""]

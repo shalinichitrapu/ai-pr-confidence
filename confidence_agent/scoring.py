@@ -114,6 +114,16 @@ def score(s: Signals, config: Optional[Config] = None) -> Score:
     else:
         passed.append("No coverage exclusions, removed instrumentation or silenced errors")
 
+    # 4b. What tests can't judge: risky calls and new dependencies
+    if s.risky_code:
+        deductions.append(("Security", w.security.points(len(s.risky_code)),
+                           f"{len(s.risky_code)} security-sensitive call(s) or value(s) on changed lines"))
+    else:
+        passed.append("No security-sensitive calls on changed lines")
+    if s.dependency_changes:
+        deductions.append(("Dependencies", w.dependencies.points(len(s.dependency_changes)),
+                           f"{len(s.dependency_changes)} dependency added or changed; review it before merging"))
+
     # 5. Metrics and memory, compared within the same test
     if s.metrics_enabled:
         flagged = len(s.metric_regressions) + len(s.new_error_metrics)

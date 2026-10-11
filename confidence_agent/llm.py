@@ -76,6 +76,9 @@ def summarize(url: str, model: str, score, signals, timeout: int = 240) -> Optio
         "new_error_metrics": signals.new_error_metrics,
         "memory_regressions": signals.memory_regressions,
         "hidden_code": signals.hidden_code,
+        "security_sensitive_code": signals.risky_code,
+        "dependency_changes": signals.dependency_changes,
+        "files_tests_cannot_exercise": signals.unmeasured_files,
         "mutations_no_test_noticed": signals.mutants_survived,
         "errors_only_in_new_tests": {**signals.new_test_error_logs, **signals.new_test_span_exceptions},
     }
