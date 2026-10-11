@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import traceback
 import tracemalloc
 from typing import Any, Dict, List, Optional
@@ -171,6 +172,26 @@ def _span_to_dict(span) -> Dict[str, Any]:
     }
 
 
+def _outside_imports() -> List[str]:
+    """Modules loaded from the user's repository rather than the checkout under test.
+
+    If this happens, the run measured the wrong version of the code.
+    """
+    repo, workdir = os.environ.get("CONFIDENCE_REPO"), os.environ.get("CONFIDENCE_WORKDIR")
+    if not repo or not workdir:
+        return []
+    repo, workdir = os.path.realpath(repo), os.path.realpath(workdir)
+    found = set()
+    for module in list(sys.modules.values()):
+        path = getattr(module, "__file__", None)
+        if not path:
+            continue
+        path = os.path.realpath(path)
+        if path.startswith(repo + os.sep) and not path.startswith(workdir + os.sep):
+            found.add(os.path.relpath(path, repo))
+    return sorted(found)
+
+
 def pytest_sessionfinish(session, exitstatus):
     out = os.environ.get("CONFIDENCE_TELEMETRY_OUT")
     if not out:
@@ -184,6 +205,7 @@ def pytest_sessionfinish(session, exitstatus):
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(
             {"spans": spans, "logs": _logs, "metrics": _metrics, "memory": _memory, "test_ids": _test_ids,
-             "otel": _exporter is not None, "otel_metrics": _metric_reader is not None},
+             "otel": _exporter is not None, "otel_metrics": _metric_reader is not None,
+             "outside_imports": _outside_imports()},
             fh, indent=1,
         )

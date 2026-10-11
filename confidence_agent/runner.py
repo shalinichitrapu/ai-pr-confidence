@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -29,6 +30,8 @@ class RunResult:
     node_ids: List[str] = field(default_factory=list)  # pytest ids that metrics and memory use
     otel_enabled: bool = False
     otel_metrics_enabled: bool = False
+    # Files the tests imported from the user's repository instead of this checkout.
+    outside_imports: List[str] = field(default_factory=list)
     exit_code: int = 0
     output_tail: str = ""
 
@@ -60,7 +63,21 @@ def _parse_junit(path: Path) -> tuple:
     return tests, durations
 
 
-def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_memory: bool = True) -> RunResult:
+def _import_paths(workdir: Path) -> List[str]:
+    """Folders that must win over any installed copy of the project.
+
+    An editable install (pip install -e) points Python at the user's own
+    checkout. Putting this checkout first makes the tests import the version
+    being scored. A src/ layout needs src/ on the path as well.
+    """
+    paths = [str(workdir)]
+    if (workdir / "src").is_dir():
+        paths.insert(0, str(workdir / "src"))
+    return paths
+
+
+def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_memory: bool = True,
+              repo: Path = None) -> RunResult:
     scratch = Path(tempfile.mkdtemp(prefix=f"confidence-{label}-"))
     plugin_dir = _plugin_dir()
     junit = scratch / "junit.xml"
@@ -69,8 +86,11 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_mem
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (str(plugin_dir), env.get("PYTHONPATH", "")) if p
+        p for p in (str(plugin_dir), *_import_paths(workdir), env.get("PYTHONPATH", "")) if p
     )
+    env["CONFIDENCE_WORKDIR"] = str(workdir.resolve())
+    if repo is not None:
+        env["CONFIDENCE_REPO"] = str(Path(repo).resolve())
     env["CONFIDENCE_TELEMETRY_OUT"] = str(telemetry)
     env["COVERAGE_FILE"] = str(scratch / ".coverage")
     env["CONFIDENCE_MEMORY"] = "1" if track_memory else "0"
@@ -81,6 +101,10 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_mem
         "-m", "pytest", tests_path, "-q", "-p", PLUGIN_MODULE,
         f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider",
     ]
+    if importlib.util.find_spec("xdist") is not None:
+        # Parallel workers are separate processes that coverage and the plugin
+        # don't see, so run in one process even if the project's config says -n.
+        cmd += ["-n", "0"]
     proc = subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
     subprocess.run(
         [sys.executable, "-m", "coverage", "json", "-q", "-o", str(cov_json)],
@@ -99,6 +123,7 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_mem
         result.node_ids = data.get("test_ids", [])
         result.otel_enabled = data.get("otel", False)
         result.otel_metrics_enabled = data.get("otel_metrics", False)
+        result.outside_imports = data.get("outside_imports", [])
 
     shutil.rmtree(plugin_dir, ignore_errors=True)
     shutil.rmtree(scratch, ignore_errors=True)

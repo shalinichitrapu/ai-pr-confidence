@@ -1,0 +1,2 @@
+[console_scripts]
+confidence-agent = confidence_agent.cli:main

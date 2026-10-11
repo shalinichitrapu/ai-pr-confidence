@@ -52,6 +52,7 @@ class Signals:
     otel_enabled: bool = False
     metrics_enabled: bool = False
     memory_enabled: bool = False
+    warnings: List[str] = field(default_factory=list)  # reasons the evidence may be unreliable
 
     @property
     def changed_line_coverage(self) -> float:
@@ -215,6 +216,16 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             s.memory_regressions[test] = {
                 "before_mb": round(before / 2**20, 1), "after_mb": round(after / 2**20, 1)
             }
+
+    for run in (base, head):
+        if run.outside_imports:
+            shown = ", ".join(f"`{p}`" for p in run.outside_imports[:3])
+            more = f" and {len(run.outside_imports) - 3} more" if len(run.outside_imports) > 3 else ""
+            s.warnings.append(
+                f"The {run.label} run imported {shown}{more} from your working copy instead of the "
+                f"{run.label} checkout, so it may not have tested the {run.label} version. "
+                "Check how the project is installed (e.g. `pip install -e`) and the test import path."
+            )
 
     s.diff_lines = diff.size
     s.files_changed = diff.files_changed
