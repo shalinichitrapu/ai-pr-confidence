@@ -81,7 +81,15 @@ def score(s: Signals) -> Score:
         else:
             passed.append("No latency regressions in traced operations")
 
-    # 4. Metrics and memory, compared within the same test
+    # 4. Changes that hide code from the other checks
+    if s.hidden_code:
+        kinds = ", ".join(s.hidden_code)
+        deductions.append(("Visibility", min(20, 10 * len(s.hidden_code)),
+                           f"Code hidden from these checks: {kinds}"))
+    else:
+        passed.append("No coverage exclusions added or instrumentation removed")
+
+    # 5. Metrics and memory, compared within the same test
     if s.metrics_enabled:
         flagged = len(s.metric_regressions) + len(s.new_error_metrics)
         if flagged:
@@ -100,7 +108,7 @@ def score(s: Signals) -> Score:
         else:
             passed.append("No memory growth in tests")
 
-    # 5. Reviewability
+    # 6. Reviewability
     if s.code_diff_lines > LARGE_DIFF_LINES:
         deductions.append(
             ("Size", 5, f"Large change ({s.code_diff_lines} lines, not counting tests) is harder to review")

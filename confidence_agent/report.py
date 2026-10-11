@@ -81,6 +81,11 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     if signals.memory_regressions:
         details += ["**Peak memory per test**",
                     *[f"- `{k}`: {v['before_mb']} MB → {v['after_mb']} MB" for k, v in signals.memory_regressions.items()], ""]
+    if signals.hidden_code:
+        details += ["**Code hidden from the other checks** (net, across the whole diff)"]
+        for kind, lines in signals.hidden_code.items():
+            details += [f"- {kind}:", *[f"  - `{line}`" for line in lines[:5]]]
+        details.append("")
     if details:
         md += ["<details><summary>Evidence details</summary>", "", *details, "</details>", ""]
 

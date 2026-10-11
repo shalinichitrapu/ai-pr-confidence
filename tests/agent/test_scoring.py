@@ -24,6 +24,7 @@ def test_clean_change_scores_100_with_every_check_listed():
         "No new ERROR logs",
         "No new exceptions in traces",
         "No latency regressions in traced operations",
+        "No coverage exclusions added or instrumentation removed",
         "No unusual changes in app metrics",
         "No memory growth in tests",
     ]
@@ -32,7 +33,9 @@ def test_clean_change_scores_100_with_every_check_listed():
 def test_disabled_checks_are_neither_passed_nor_deducted():
     r = score(Signals(tests_total=3))
     assert r.value == 100
-    assert r.passed_checks == ["All 3 tests pass", "No new ERROR logs"]
+    assert r.passed_checks == [
+        "All 3 tests pass", "No new ERROR logs", "No coverage exclusions added or instrumentation removed",
+    ]
 
 
 def test_newly_failing_tests_cost_45_then_5_each_up_to_55():

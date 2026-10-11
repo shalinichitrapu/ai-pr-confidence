@@ -43,6 +43,8 @@ class Diff:
     file_lines: Dict[str, int] = field(default_factory=dict)  # path -> lines added + removed
     lines_added: int = 0
     lines_removed: int = 0
+    added_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> added lines
+    removed_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> removed lines
 
     @property
     def size(self) -> int:
@@ -81,17 +83,35 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
             diff.lines_removed += int(removed)
             diff.file_lines[path] = int(added) + int(removed)
 
-    current = None
+    current = old = None
+    in_header = False
     for line in git(repo, "diff", "--unified=0", "--no-color", base, head).splitlines():
-        if line.startswith("+++ "):
-            target = line[4:].rstrip("\t")  # git appends a tab after names with spaces
+        if line.startswith("diff --git "):
+            in_header, current, old = True, None, None
+            continue
+        # git appends a tab after file names with spaces
+        if in_header and line.startswith("--- "):
+            source = line[4:].rstrip("\t")
+            old = source[2:] if source.startswith("a/") else None
+            continue
+        if in_header and line.startswith("+++ "):
+            target = line[4:].rstrip("\t")
             current = target[2:] if target.startswith("b/") else None
             if current:
                 diff.added_lines.setdefault(current, set())
             continue
         m = _HUNK.match(line)
-        if m and current:
-            start = int(m.group(1))
-            count = int(m.group(2)) if m.group(2) is not None else 1
-            diff.added_lines[current].update(range(start, start + count))
+        if m:
+            in_header = False
+            if current:
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) is not None else 1
+                diff.added_lines[current].update(range(start, start + count))
+            continue
+        if in_header:
+            continue
+        if line.startswith("+") and current:
+            diff.added_text.setdefault(current, []).append(line[1:])
+        elif line.startswith("-") and old:
+            diff.removed_text.setdefault(old, []).append(line[1:])
     return diff
