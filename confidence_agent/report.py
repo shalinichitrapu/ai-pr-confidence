@@ -34,15 +34,18 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     for warning in signals.warnings:
         md += [f"> ⚠️ **Results may be unreliable.** {warning}", ""]
 
-    if summary:
-        md += ["**Summary** _(written by a local model from the evidence below; it does not affect the score)_", "", summary, ""]
-
     md += ["| Signal | Impact | Evidence |", "|---|---:|---|"]
     for signal, pts, reason in score.deductions:
         md.append(f"| {signal} | −{pts} | {reason} |")
     for check in score.passed_checks:
         md.append(f"| ✓ | 0 | {check} |")
     md.append("")
+
+    # Below the measured evidence, not above it: the model reads text the pull
+    # request controls, so its summary should never be the first thing a reviewer sees.
+    if summary:
+        md += ["**Model summary** _(a local model's reading of the evidence above. It can be wrong "
+               "and does not affect the score.)_", "", summary, ""]
 
     details = []
     if signals.tests_newly_failing:
