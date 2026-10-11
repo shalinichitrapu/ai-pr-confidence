@@ -96,3 +96,17 @@ def test_existing_exclusions_are_left_alone():
     diff = Diff(added_lines={"pkg/a.py": {2}}, added_text={"pkg/a.py": ["    raise NotImplementedError"]})
     s = compute(RunResult("b"), RunResult("h", coverage=cov), diff, "tests")
     assert s.changed_code_lines == 0
+
+
+def test_removed_lines_in_files_with_spaces_or_non_ascii_names(tmp_path):
+    repo = tmp_path
+    git(repo, "init", "-q")
+    (repo / "my file.py").write_text('log.error("a")\nx = 1\n')
+    (repo / "café.py").write_text('log.error("b")\ny = 1\n')
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+    (repo / "my file.py").write_text("x = 1\n")
+    (repo / "café.py").write_text("y = 1\n")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "head")
+    diff = read_diff(repo, "HEAD~1", "HEAD")
+    assert diff.removed_text == {"my file.py": ['log.error("a")'], "café.py": ['log.error("b")']}
