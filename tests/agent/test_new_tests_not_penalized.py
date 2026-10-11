@@ -24,12 +24,33 @@ def span(test, name="op", ms=1.0, exc=None):
     return {"name": name, "duration_ms": ms, "status": "UNSET", "events": events, "test": test}
 
 
-def test_errors_in_a_new_test_are_listed_but_not_scored():
+def test_errors_in_a_new_test_count_at_half_weight():
     head = run([OLD, NEW], logs=[error_log(NEW)], spans=[span(NEW, exc="TypeError")])
     s = compute(run([OLD]), head, Diff(), "tests")
     assert s.new_error_logs == {} and s.new_span_exceptions == {}
     assert s.new_test_error_logs == {"app a.py:f: bad input": 1}
     assert s.new_test_span_exceptions == {"op: TypeError": 1}
+    assert score(s).value == 85  # half of -20 for logs, half of -10 for traces
+
+
+EXPECTING = """
+import pytest
+
+def test_old():
+    pass
+
+def test_new_error_path():
+    with pytest.raises(TypeError):
+        plan("bad")
+"""
+
+
+def test_errors_in_a_new_test_that_expects_an_exception_are_not_scored():
+    head = run([OLD, NEW], logs=[error_log(NEW)], spans=[span(NEW, exc="TypeError")])
+    diff = Diff(head_source={"tests/test_a.py": EXPECTING})
+    s = compute(run([OLD]), head, diff, "tests")
+    assert s.new_test_error_logs == {} and s.new_test_span_exceptions == {}
+    assert s.new_test_expected_errors == {"app a.py:f: bad input": 1, "op: TypeError": 1}
     assert score(s).value == 100
 
 

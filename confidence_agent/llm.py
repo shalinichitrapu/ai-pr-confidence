@@ -76,6 +76,7 @@ def summarize(url: str, model: str, score, signals, timeout: int = 240) -> Optio
         "new_error_metrics": signals.new_error_metrics,
         "memory_regressions": signals.memory_regressions,
         "hidden_code": signals.hidden_code,
+        "errors_only_in_new_tests": {**signals.new_test_error_logs, **signals.new_test_span_exceptions},
     }
     data = _clip({
         "deductions": [f"-{p} {reason}" for _, p, reason in score.deductions] or "none",

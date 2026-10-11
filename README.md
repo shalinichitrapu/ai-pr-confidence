@@ -53,10 +53,11 @@ automatic first check worth having. It doesn't replace code review.
 
 Bands: **High** ≥ 85, **Medium** 60–84, **Low** < 60.
 
-Logs, exceptions on spans and latency are scored only for tests that exist both
-before and after the change, because those ran the same inputs. Errors that
-appear only in tests the change adds (often tests of error handling) are listed
-in the report but not scored.
+Logs, exceptions on spans and latency are scored fully only for tests that exist
+both before and after the change, because those ran the same inputs. Errors that
+appear only in tests the change adds count at half weight: they're the only place a
+new feature's swallowed errors can show up. If the new test expects an exception
+(`pytest.raises` or `assertRaises`), its errors are listed but not scored.
 
 4. Optionally, a **local model** (Ollama) writes a 2–4 bullet summary of the
    evidence. The model never changes the score, and every point is explained.
