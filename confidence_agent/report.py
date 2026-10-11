@@ -47,6 +47,12 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     details = []
     if signals.tests_newly_failing:
         details += ["**Newly failing tests**", *[f"- `{t}`" for t in signals.tests_newly_failing], ""]
+    if signals.tests_failed and not signals.tests_newly_failing:
+        details += ["**Tests that failed before and after this change**",
+                    *[f"- `{t}`" for t in signals.tests_failed], ""]
+    if signals.tests_moved:
+        details += ["**Tests moved, not removed** (same name, new module)",
+                    *[f"- `{a}` → `{b}`" for a, b in signals.tests_moved.items()], ""]
     if signals.tests_removed:
         details += ["**Tests removed by this change**", *[f"- `{t}`" for t in signals.tests_removed], ""]
     if signals.uncovered_changes:

@@ -35,10 +35,10 @@ def test_disabled_checks_are_neither_passed_nor_deducted():
     assert r.passed_checks == ["All 3 tests pass", "No new ERROR logs"]
 
 
-def test_newly_failing_tests_cost_40_then_5_each_up_to_50():
-    assert points(score(clean(tests_newly_failing=["a"])), "Tests") == 40
-    assert points(score(clean(tests_newly_failing=["a", "b"])), "Tests") == 45
-    assert points(score(clean(tests_newly_failing=list("abcdef"))), "Tests") == 50
+def test_newly_failing_tests_cost_45_then_5_each_up_to_55():
+    assert points(score(clean(tests_newly_failing=["a"])), "Tests") == 45
+    assert points(score(clean(tests_newly_failing=["a", "b"])), "Tests") == 50
+    assert points(score(clean(tests_newly_failing=list("abcdef"))), "Tests") == 55
 
 
 def test_removed_tests_cost_15():
@@ -107,8 +107,10 @@ def test_large_diff_costs_5():
 
 def test_bands():
     assert score(clean(new_error_logs={"a": 1})).band == "High"  # 85
-    assert score(clean(tests_newly_failing=["a"])).band == "Medium"  # 60
-    assert score(clean(tests_newly_failing=["a"], diff_lines=500)).band == "Low"  # 55
+    medium = clean(new_error_logs={"a": 1}, new_span_exceptions={"b": 1},
+                   latency_regressions={"c": {}}, diff_lines=500)
+    assert score(medium).value == 60 and score(medium).band == "Medium"
+    assert score(clean(tests_newly_failing=["a"])).band == "Low"  # 55
 
 
 def test_score_never_goes_below_zero():
