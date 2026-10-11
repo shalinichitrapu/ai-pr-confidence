@@ -24,6 +24,11 @@ show up in a code review. This agent runs the code before and after the change
 with OpenTelemetry tracing and log capture turned on, compares the two, and
 turns the difference into a score a reviewer can act on.
 
+Nothing in the scoring is specific to AI: it works on any change, whoever wrote
+it. It's aimed at AI-written changes because the problems it looks for are ones
+AI tools often produce, and because the number of changes they produce makes an
+automatic first check worth having. It doesn't replace code review.
+
 ## How it works
 
 1. Find the merge base of the PR and check out **before** and **after** snapshots (git worktrees).
@@ -53,8 +58,10 @@ appear only in tests the change adds (often tests of error handling) are listed
 in the report but not scored.
 
 4. Optionally, a **local model** (Ollama) writes a 2–4 bullet summary of the
-   evidence. The model never changes the score, so the number is deterministic
-   and every point is explained.
+   evidence. The model never changes the score, and every point is explained.
+   Tests, coverage, logs and metrics give the same result every time for the same
+   code. Latency and memory come from a single measured run, so they can vary a
+   little between runs.
 
 The app being tested only needs the OpenTelemetry **API**. The agent supplies the
 SDK at test time, so no changes to the target project are required.
@@ -355,9 +362,18 @@ points if its new code isn't tested.
 - Python + pytest only for now; the signal and scoring layers are language-agnostic.
 - Telemetry comes from test runs, so it only sees code paths tests exercise.
   Next: replay recorded production traffic, or score canary deployments with the same signals.
-- Weights are hand-tuned. Next: label a set of real AI-generated PRs
-  (merged cleanly vs. reverted or caused incidents) and fit weights to them.
+- **Weights and thresholds were picked by hand** while building the demo, and
+  haven't been checked against real codebases yet. They're constants at the top of
+  `confidence_agent/signals.py` and `confidence_agent/scoring.py`. Next: score real
+  past PRs (merged cleanly vs. reverted or caused incidents) and fit the weights to
+  those outcomes.
 - Latency comparison uses medians from a single run; repeated runs would cut noise.
 - Metric thresholds (2× and +3) ignore units, and a metric that grows because of a
   wanted feature is still flagged. Read metric deductions as "look here", not "this is a bug".
 - `tracemalloc` only sees memory Python allocates; some native libraries' memory isn't counted.
+- **Cost:** the test suite runs twice (before and after), under coverage, and memory
+  tracking makes it roughly 2–3× slower again. Use `--no-memory` for large suites.
+- **It can be worked around.** A change written to score well, rather than to be
+  correct, can avoid the checks: for example by testing only the happy path, or by
+  handling errors without logging them. A High score means no warning signs were
+  found, not that the change is correct.
