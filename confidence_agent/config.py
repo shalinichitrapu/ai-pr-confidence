@@ -9,7 +9,7 @@ fails the run before it can be merged.
     source = "my_package"               # default for --source
     tests = "tests"                     # default for --tests
     min_score = 60                      # default for --min-score
-    ignore = ["*migrations/*", "*_pb2.py"]           # changed files never scored
+    ignore = ["migrations/*", "*/migrations/*", "*_pb2.py"]  # changed files never scored
     expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures not scored
 
     [tool.confidence.bands]
@@ -85,6 +85,7 @@ class Thresholds:
     memory_min_delta_mb: float = 5.0
     max_mutants: int = 20  # 0 turns mutation testing off
     mutant_timeout_s: float = 60.0
+    mutation_budget_s: float = 300.0  # all mutants together; the rest are skipped when it runs out
 
 
 @dataclass
@@ -134,6 +135,19 @@ def _strings(value: Any, where: str) -> List[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ConfigError(f"{where} must be a list of strings")
     return value
+
+
+def raw_table(text: str) -> Any:
+    """The [tool.confidence] table as written (or the text itself if it isn't valid TOML).
+
+    Used to tell whether a pull request changed the table.
+    """
+    try:
+        doc = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return text
+    tool = doc.get("tool")
+    return tool.get("confidence") if isinstance(tool, dict) else tool
 
 
 def parse(text: str) -> Config:
