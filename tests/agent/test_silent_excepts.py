@@ -97,3 +97,44 @@ def test_read_diff_keeps_the_head_source_of_changed_python_files(tmp_path):
     diff = read_diff(tmp_path, "HEAD~1", "HEAD")
     assert set(diff.head_source) == {"pay.py"}
     assert silent_excepts(diff.head_source["pay.py"], diff.added_lines["pay.py"]) == [4]
+
+
+MOVED = "def load():\n    try:\n        return read()\n    except Exception:\n        return None\n"
+
+
+def test_moved_or_reindented_handler_is_not_new():
+    from confidence_agent.signals import compute
+    d = Diff(added_lines={"pkg/other.py": {1, 2, 3, 4, 5}}, head_source={"pkg/other.py": MOVED},
+             removed_text={"pkg/util.py": MOVED.splitlines()})
+    assert compute(RunResult("b"), RunResult("h"), d, "tests").hidden_code == {}
+    # Re-indented inside a with block: same lines once stripped.
+    wrapped = "def load():\n    with lock:\n        try:\n            return read()\n        except Exception:\n            return None\n"
+    d = Diff(added_lines={"pkg/util.py": {2, 3, 4, 5, 6}}, head_source={"pkg/util.py": wrapped},
+             removed_text={"pkg/util.py": ["    try:", "        return read()", "    except Exception:", "        return None"]})
+    assert compute(RunResult("b"), RunResult("h"), d, "tests").hidden_code == {}
+
+
+def test_one_deletion_explains_only_one_handler():
+    from confidence_agent.signals import compute
+    two = MOVED + "\n\n" + MOVED.replace("load", "load2")
+    d = Diff(added_lines={"pkg/a.py": set(range(1, 13))}, head_source={"pkg/a.py": two},
+             removed_text={"pkg/b.py": MOVED.splitlines()})
+    assert len(compute(RunResult("b"), RunResult("h"), d, "tests").hidden_code["errors silenced without a trace"]) == 1
+
+
+def test_form_feed_doesnt_shift_the_quoted_line():
+    from confidence_agent.signals import compute
+    src = "import os\n\x0c\ndef f():\n    try:\n        os.remove('x')\n    except Exception:\n        pass\n"
+    d = Diff(added_lines={"pkg/ff.py": {6, 7}}, head_source={"pkg/ff.py": src})
+    found = compute(RunResult("b"), RunResult("h"), d, "tests").hidden_code["errors silenced without a trace"]
+    assert found == ["pkg/ff.py:6: except Exception:"]
+
+
+def test_inner_reraise_and_unrelated_set_status_dont_count_as_handling():
+    src = (
+        "def a():\n    try:\n        pay()\n    except Exception:\n"
+        "        try:\n            conn.rollback()\n        except Exception:\n            raise\n\n"
+        "def b():\n    try:\n        pay()\n    except Exception:\n        resp.set_status(200)\n\n"
+        "def c():\n    try:\n        pay()\n    except Exception:\n        span.set_status(Status(StatusCode.ERROR))\n"
+    )
+    assert silent_excepts(src, range(1, 30)) == [4, 13]

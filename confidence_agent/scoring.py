@@ -80,7 +80,7 @@ def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, 
         pts = w.error_logs.points(len(s.new_error_logs))
         total = sum(s.new_error_logs.values())
         deductions.append(("Logs", pts, f"{total} new ERROR log(s) across {len(s.new_error_logs)} signature(s), a sign of errors being caught and hidden"))
-    else:
+    elif not s.new_test_error_logs:
         passed.append("No new ERROR logs")
     # Errors seen only in tests this change adds: half weight. They may be what
     # the new test checks, but they're also the only place a new feature's
@@ -100,7 +100,7 @@ def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, 
             pts = w.span_exceptions.points(len(s.new_span_exceptions))
             total = sum(s.new_span_exceptions.values())
             deductions.append(("Traces", pts, f"{total} new exception(s) recorded on spans"))
-        else:
+        elif not s.new_test_span_exceptions:
             passed.append("No new exceptions in traces")
         if s.latency_regressions:
             pts = w.latency.points(len(s.latency_regressions))
