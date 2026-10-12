@@ -55,7 +55,8 @@ def test_reverted_merge_is_marked_bad_and_scored(tmp_path):
     assert ",100,High," in by_subject["Merge good"]
     assert "Coverage" in by_subject["Merge bad"]  # h() is untested
     md = (out / "calibration.md").read_text()
-    assert "2 changes scored, 1 later reverted or marked bad (50%)" in md
+    # The revert commit is itself a direct commit on main, so it's scored too.
+    assert "3 changes scored, 1 later reverted or marked bad (33%)" in md
 
 
 def test_squash_merged_history_uses_each_commit(tmp_path):
@@ -86,3 +87,32 @@ def test_report_lift():
     assert "| Medium | 2 | 1 | 50% |" in md
     assert "| Coverage | 2 | 1 | 1.0 |" in md  # 50% vs 50% overall
     assert "| Tests | 1 | 1 | 2.0 |" in md
+
+
+def test_revert_inside_the_pull_request_doesnt_count_and_direct_commits_are_scored(tmp_path):
+    repo = project(tmp_path)
+    git(repo, "checkout", "-q", "-b", "a", "main")
+    write(repo, {"notes.md": "wip\n"})
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "wip")
+    git(repo, "revert", "--no-edit", "HEAD")
+    write(repo, {"notes.md": "done\n"})
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "finish")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "a", "-m", "Merge A")
+    write(repo, {"hotfix.md": "x\n"})
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "hotfix direct to main")
+    git(repo, "revert", "--no-edit", "HEAD")
+    found = {c.subject: c for c in calibrate.changes(repo, "main", 10)}
+    assert {"Merge A", "hotfix direct to main"} <= set(found)
+    reverts = calibrate.reverted(repo, "main")
+    assert calibrate._is_reverted(found["Merge A"], reverts) is None
+    assert calibrate._is_reverted(found["hotfix direct to main"], reverts) is not None
+
+
+def test_bad_outcome_rows_are_skipped(tmp_path):
+    rows = tmp_path / "o.csv"
+    rows.write_text(",bad\nab,bad\nABCDEF1234,Bad\nnot-a-sha,good\n")
+    assert calibrate._outcomes(rows) == {"abcdef1234": "bad"}

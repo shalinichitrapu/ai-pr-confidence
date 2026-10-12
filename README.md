@@ -451,9 +451,10 @@ with what happened to them:
 confidence-calibrate --repo . --branch main --limit 30 --source my_package
 ```
 
-It scores each merge commit on the branch (or each commit, if the project
-squash-merges) and marks the ones that were later reverted, using git's own "This
-reverts commit …" messages. For outcomes git can't see, such as incidents or
+It scores each commit on the branch's first-parent line (a merge commit covers
+everything it merged; a direct or squashed commit covers itself) and marks the ones
+that were later reverted, using git's own "This reverts commit …" messages. A revert
+made inside a pull request before it merged doesn't count. For outcomes git can't see, such as incidents or
 hotfixes, pass `--outcomes outcomes.csv` with `sha,bad` or `sha,good` rows.
 
 `confidence-calibration/calibration.md` shows:

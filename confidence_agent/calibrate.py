@@ -2,8 +2,9 @@
 
     confidence-calibrate --repo . --branch main --limit 30 --source my_package
 
-Scores recent changes on a branch (each merge commit, or each commit if the
-project squash-merges), finds the ones that were later reverted, and reports how
+Scores recent changes on a branch (each commit on its first-parent line: a merge
+commit covers everything it merged, any other commit covers itself), finds the
+ones that were later reverted, and reports how
 often each band and each kind of deduction was followed by a revert. That's the
 evidence for tuning [tool.confidence.weights]: a deduction whose PRs get
 reverted far more often than average deserves more weight, and one with no
@@ -46,7 +47,12 @@ class Change:
 
 
 def changes(repo: Path, branch: str, limit: int) -> List[Change]:
-    """Recent changes on the branch, newest first: merge commits if there are any, else commits."""
+    """Recent changes on the branch, newest first.
+
+    Every commit on the first-parent line is one change: a merge covers what it
+    merged, and a direct or squashed commit covers itself. Histories that mix
+    both styles are scored in full.
+    """
     log = gitutil.git(repo, "log", "--first-parent", f"-{limit}", "--format=%H %P%x00%s%x00%b%x01", branch)
     found = []
     for record in log.split("\x01"):
@@ -59,9 +65,8 @@ def changes(repo: Path, branch: str, limit: int) -> List[Change]:
         if not parents:
             continue  # the root commit has nothing to compare against
         found.append((sha, parents, subject))
-    merges = [c for c in found if len(c[1]) == 2]
     out = []
-    for sha, parents, subject in (merges or found):
+    for sha, parents, subject in found:
         base, head = (parents[0], parents[1]) if len(parents) == 2 else (parents[0], sha)
         commits = set(gitutil.git(repo, "rev-list", f"{base}..{head}").split()) | {sha}
         out.append(Change(sha, base, head, subject, commits))
@@ -80,17 +85,34 @@ def reverted(repo: Path, branch: str) -> Dict[str, str]:
 
 
 def _is_reverted(change: Change, reverts: Dict[str, str]) -> Optional[str]:
+    """The commit that reverted part of this change, if any.
+
+    A revert made inside the change itself (a work-in-progress commit undone
+    before merging) doesn't count.
+    """
     for target, by in reverts.items():
+        if by in change.commits:
+            continue
         if any(c.startswith(target) or target.startswith(c) for c in change.commits):
             return by
     return None
 
 
 def _outcomes(path: Optional[Path]) -> Dict[str, str]:
+    """{sha (lowercase, at least 7 hex characters): outcome}. Other rows are skipped with a message."""
     if path is None:
         return {}
+    labels = {}
     with path.open(newline="") as fh:
-        return {row[0].strip(): row[1].strip().lower() for row in csv.reader(fh) if len(row) >= 2}
+        for row in csv.reader(fh):
+            if len(row) < 2:
+                continue
+            sha, outcome = row[0].strip().lower(), row[1].strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+                print(f"[calibrate] skipping outcome row {row!r}: the sha must be 7-40 hex characters")
+                continue
+            labels[sha] = outcome
+    return labels
 
 
 def report(items: List[Change]) -> str:
@@ -151,7 +173,7 @@ def main(argv=None) -> int:
         by = _is_reverted(change, reverts)
         if by:
             change.outcome, change.why = "bad", f"reverted by {by[:7]}"
-        label = next((v for k, v in labels.items() if change.sha.startswith(k) or k.startswith(change.sha)), None)
+        label = next((v for k, v in labels.items() if change.sha.startswith(k)), None)
         if label in ("bad", "good"):
             change.outcome, change.why = label, "from --outcomes"
         with tempfile.TemporaryDirectory(prefix="confidence-calibrate-") as out:
