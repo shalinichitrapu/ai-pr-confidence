@@ -101,7 +101,7 @@ def test_lines_without_a_covering_test_are_not_mutated(tmp_path):
 
 def test_scoring_is_proportional_to_survivors():
     s = Signals(tests_total=1, mutants_tested=10, mutants_survived=["m"] * 4)
-    assert [d for d in score(s).deductions if d[0] == "Mutation"][0][1] == 6  # 40% of 15
+    assert [d for d in score(s).deductions if d[0] == "Mutation"][0][1] == 8  # 40% of 20
     s = Signals(tests_total=1, mutants_tested=5)
     assert "Tests caught all 5 small changes made to the changed lines" in score(s).passed_checks
 
@@ -132,7 +132,7 @@ def test_end_to_end_weak_test_is_caught_and_can_be_turned_off(tmp_path):
     on = json.loads((tmp_path / "on" / "result.json").read_text())
     assert on["signals"]["mutants_tested"] == 2
     assert len(on["signals"]["mutants_survived"]) == 2
-    assert any(d["signal"] == "Mutation" and d["points"] == 15 for d in on["deductions"])
+    assert any(d["signal"] == "Mutation" and d["points"] == 20 for d in on["deductions"])
 
     cli.main(base_args + ["--no-mutation", "--out", str(tmp_path / "off")])
     off = json.loads((tmp_path / "off" / "result.json").read_text())

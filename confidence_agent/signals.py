@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import statistics
 from collections import Counter
@@ -13,7 +14,7 @@ from .expectations import expects_exception, node_file
 from .gitutil import Diff
 from .review_scope import config_only, risky_code, unmeasured
 from .swallow import new_silent_excepts, removed_silent_handlers
-from .runner import RunResult
+from .runner import RunResult, junit_id
 
 # Thresholds (how much slower, how much a metric or memory must grow) come from
 # config.Thresholds. Each requires both a ratio and a real absolute change, so
@@ -36,6 +37,8 @@ class Signals:
     risky_code: List[str] = field(default_factory=list)  # security-sensitive calls on changed lines
     unmeasured_files: List[str] = field(default_factory=list)  # config/data files tests can't exercise
     mutation_note: str = ""  # why mutation testing didn't run or couldn't conclude
+    tests_skipped_count: int = 0  # every skipped/xfailed test in the head run
+    tests_skipped: List[str] = field(default_factory=list)  # passed before, skipped or xfailed now
     tests_flaky: List[str] = field(default_factory=list)  # newly failed, then passed on a rerun
     tests_moved: Dict[str, str] = field(default_factory=dict)  # old id -> new id, same test name
 
@@ -172,26 +175,86 @@ def _all(test: Optional[str]) -> bool:
     return True
 
 
-def _error_log_signatures(run: RunResult, keep: Keep = _all) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for rec in run.logs:
-        if rec["level"] not in ("ERROR", "CRITICAL") or not keep(rec["test"]):
-            continue
-        sig = f"{rec['logger']} {rec['location']}: {rec['exc_type'] or rec['template']}"
-        counts[sig] = counts.get(sig, 0) + 1
-    return counts
+def _is_error_log(rec: Dict[str, Any]) -> bool:
+    return rec["level"] in ("ERROR", "CRITICAL")
 
 
-def _span_exception_signatures(run: RunResult, keep: Keep = _all) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for span in run.spans:
-        if not keep(span["test"]):
+def _log_signature(rec: Dict[str, Any]) -> str:
+    return f"{rec['logger']} {rec['location']}: {rec['exc_type'] or rec['template']}"
+
+
+def _record_signatures(records, signature, keep_record):
+    """(test, signature) for each error log (signature given) or each exception on a span (None)."""
+    for rec in records:
+        if signature is not None:
+            if keep_record(rec):
+                yield rec["test"], signature(rec)
             continue
-        for ev in span["events"]:
+        for ev in rec["events"]:
             if ev["name"] == "exception":
-                sig = f"{span['name']}: {ev['exc_type']}"
-                counts[sig] = counts.get(sig, 0) + 1
-    return counts
+                yield rec["test"], f"{rec['name']}: {ev['exc_type']}"
+
+
+def _signatures_by_test(records, signature, keep_record) -> Dict[Optional[str], set]:
+    found: Dict[Optional[str], set] = {}
+    for test, sig in _record_signatures(records, signature, keep_record):
+        found.setdefault(test, set()).add(sig)
+    return found
+
+
+def _error_like(point: Dict[str, Any]) -> bool:
+    """A counter of failures: by its name or an attribute *value* (not the attribute's name)."""
+    return bool(ERROR_LIKE.search(point["name"]) or any(ERROR_LIKE.search(str(v)) for v in point["attributes"].values()))
+
+
+DOCS_AND_LOCKFILES = ("*.md", "*.rst", "*.txt", "docs/*", "*/docs/*", "LICENSE*", "CHANGELOG*", "*.lock",
+                      "*-lock.json", "*.lock.json", "poetry.lock", "uv.lock", "Pipfile.lock")
+
+
+def _is_docs_or_lockfile(path: str) -> bool:
+    from fnmatch import fnmatch
+    from .review_scope import is_dependency_file
+    return not is_dependency_file(path) and any(fnmatch(path, p) for p in DOCS_AND_LOCKFILES)
+
+
+def _statement_lines(source: str) -> set:
+    """Lines that start a statement: what coverage would count as executable (roughly)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    return {node.lineno for node in ast.walk(tree) if isinstance(node, ast.stmt)}
+
+
+def _moved_lines(diff: Diff, tests_path: str) -> Dict[str, set]:
+    """Added lines that are the same as lines this change removed elsewhere: moved code, not new code.
+
+    Matched by their text without indentation, one removed line per added line.
+    Short or trivial lines (`pass`, `return None`, `else:`) aren't matched, since
+    they'd pair up by chance.
+    """
+    def meaningful(text: str) -> bool:
+        return len(text) >= 12 and not text.startswith("#")
+
+    removed: Dict[str, int] = {}
+    for path, lines in diff.removed_text.items():
+        if path.endswith(".py") and not _is_test_file(path, tests_path):
+            for line in lines:
+                text = line.strip()
+                if meaningful(text):
+                    removed[text] = removed.get(text, 0) + 1
+    moved: Dict[str, set] = {}
+    for path, numbers in diff.added_lines.items():
+        source = diff.head_source.get(path)
+        if source is None or _is_test_file(path, tests_path):
+            continue
+        lines = source.split("\n")
+        for n in sorted(numbers):
+            text = lines[n - 1].strip() if n <= len(lines) else ""
+            if meaningful(text) and removed.get(text, 0) > 0:
+                removed[text] -= 1
+                moved.setdefault(path, set()).add(n)
+    return moved
 
 
 def _series(point: Dict[str, Any]) -> str:
@@ -223,7 +286,7 @@ def _metric_values(run: RunResult) -> Dict[Tuple[str, str], Tuple[str, float]]:
     return out
 
 
-def _median_durations(run: RunResult, keep: Keep = _all) -> Dict[str, float]:
+def _median_durations(run: RunResult, keep: Keep) -> Dict[str, float]:
     by_name: Dict[str, List[float]] = {}
     for span in run.spans:
         if not keep(span["test"]):
@@ -291,6 +354,10 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         )
 
     s.tests_total = len(head.tests)
+    s.tests_skipped_count = sum(1 for o in head.tests.values() if o == "skipped")
+    # A test that passed before and is skipped (or xfailed) now hides its result as
+    # surely as deleting it.
+    s.tests_skipped = sorted(t for t, o in head.tests.items() if o == "skipped" and base.tests.get(t) == "passed")
     base_failed = set(base.failed)
     s.tests_flaky = [t for t in head.failed if t not in base_failed and head.rerun.get(t) == "passed"]
     s.tests_failed = [t for t in head.failed if t not in s.tests_flaky]
@@ -309,17 +376,23 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         else:
             s.tests_removed.append(old)
 
+    moved = _moved_lines(diff, tests_path)
     for path, added in diff.added_lines.items():
         if not path.endswith(".py") or _is_test_file(path, tests_path):
             continue
         if not _in_source(path, source):
             # Coverage was never measured here, so it can't say whether tests run it.
             continue
+        added = added - moved.get(path, set())
         cov = head.coverage.get(path)
         if cov is None:
-            # coverage.py never saw the file: no test imported it at all.
-            s.changed_code_lines += len(added)
-            s.uncovered_changes[path] = sorted(added)
+            # coverage.py never saw the file: no test imported it at all. Count its
+            # statements, not its comments and blank lines.
+            statements = _statement_lines(diff.head_source.get(path, ""))
+            changed = added & statements if statements else added
+            s.changed_code_lines += len(changed)
+            if changed:
+                s.uncovered_changes[path] = sorted(changed)
             continue
         executed = set(cov.get("executed_lines", []))
         executable = executed | set(cov.get("missing_lines", []))
@@ -334,37 +407,70 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         if changed - covered:
             s.uncovered_changes[path] = sorted(changed - covered)
 
-    # Runtime evidence is scored only for tests that exist before and after, so
-    # both runs saw the same inputs. Records outside any test (e.g. at import)
-    # count too. Adding a test of an error path must not cost points.
-    shared = set(base.node_ids) & set(head.node_ids)
+    # Runtime evidence (logs, traces, latency, metrics, memory) is compared per test,
+    # for tests that exist before and after (including ones moved by a file rename),
+    # because those ran the same inputs. Each test's errors are compared with that
+    # test's own errors before the change. Records outside any test (e.g. at import)
+    # are compared with the base run's records outside any test. Tests that newly
+    # fail are left out: the failure is already scored.
+    base_by_junit = {junit_id(n): n for n in base.node_ids}
+    head_by_junit = {junit_id(n): n for n in head.node_ids}
+    base_of: Dict[str, str] = {n: n for n in head.node_ids if n in set(base.node_ids)}
+    for old, new in s.tests_moved.items():
+        if old in base_by_junit and new in head_by_junit:
+            base_of[head_by_junit[new]] = base_by_junit[old]
+    failing_now = {head_by_junit[j] for j in (*s.tests_newly_failing, *s.tests_flaky) if j in head_by_junit}
+
+    def comparable(test: Optional[str]) -> bool:
+        return test is None or (test in base_of and test not in failing_now)
+
+    def expects(test: str, side_source: Dict[str, str], node: str) -> bool:
+        return expects_exception(side_source.get(node_file(node)), node)
+
+    # A test expects an exception if its own code says so (pytest.raises /
+    # assertRaises): newly in an existing test, or anywhere in a new one.
+    expecting = set()
+    for t in head.node_ids:
+        if t in failing_now or not expects(t, diff.head_source, t):
+            continue
+        if t not in base_of or not expects(t, diff.base_source, base_of[t]):
+            expecting.add(t)
 
     def in_shared(test: Optional[str]) -> bool:
-        return test is None or test in shared
-
-    expecting = {t for t in set(head.node_ids) - shared
-                 if expects_exception(diff.head_source.get(node_file(t)), t)}
+        return comparable(test) and test not in expecting
 
     def in_new(test: Optional[str]) -> bool:
-        return test is not None and test not in shared and test not in expecting
+        return test is not None and test not in base_of and test not in failing_now and test not in expecting
 
-    def in_expecting(test: Optional[str]) -> bool:
-        return test in expecting
+    base_log_sigs = _signatures_by_test(base.logs, _log_signature, _is_error_log)
+    base_exc_sigs = _signatures_by_test(base.spans, None, None)
+    every_base_sig = set().union(*base_log_sigs.values(), *base_exc_sigs.values()) if (base_log_sigs or base_exc_sigs) else set()
 
-    base_logs = _error_log_signatures(base)
-    s.new_error_logs = {k: v for k, v in _error_log_signatures(head, in_shared).items() if k not in base_logs}
-    s.new_test_error_logs = {k: v for k, v in _error_log_signatures(head, in_new).items() if k not in base_logs}
-    base_exc = _span_exception_signatures(base)
-    s.new_span_exceptions = {
-        k: v for k, v in _span_exception_signatures(head, in_shared).items() if k not in base_exc
-    }
-    s.new_test_span_exceptions = {
-        k: v for k, v in _span_exception_signatures(head, in_new).items() if k not in base_exc
-    }
-    for found in (_error_log_signatures(head, in_expecting), _span_exception_signatures(head, in_expecting)):
+    def new_per_test(records, signature, keep_record, before, keep_test):
+        found: Dict[str, int] = {}
+        for test, sig in _record_signatures(records, signature, keep_record):
+            if not keep_test(test):
+                continue
+            seen_before = before.get(base_of.get(test, test) if test else None, set())
+            if sig not in seen_before:
+                found[sig] = found.get(sig, 0) + 1
+        return found
+
+    def new_anywhere(records, signature, keep_record, keep_test):
+        found: Dict[str, int] = {}
+        for test, sig in _record_signatures(records, signature, keep_record):
+            if keep_test(test) and sig not in every_base_sig:
+                found[sig] = found.get(sig, 0) + 1
+        return found
+
+    s.new_error_logs = new_per_test(head.logs, _log_signature, _is_error_log, base_log_sigs, in_shared)
+    s.new_span_exceptions = new_per_test(head.spans, None, None, base_exc_sigs, in_shared)
+    s.new_test_error_logs = new_anywhere(head.logs, _log_signature, _is_error_log, in_new)
+    s.new_test_span_exceptions = new_anywhere(head.spans, None, None, in_new)
+    for found in (new_anywhere(head.logs, _log_signature, _is_error_log, expecting.__contains__),
+                  new_anywhere(head.spans, None, None, expecting.__contains__)):
         for sig, n in found.items():
-            if sig not in base_logs and sig not in base_exc:
-                s.new_test_expected_errors[sig] = s.new_test_expected_errors.get(sig, 0) + n
+            s.new_test_expected_errors[sig] = s.new_test_expected_errors.get(sig, 0) + n
 
     for found in (s.new_error_logs, s.new_span_exceptions, s.new_test_error_logs, s.new_test_span_exceptions):
         for sig in [k for k in found if cfg.expected(k)]:
@@ -381,13 +487,15 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
 
     # Timings from a cached base run may come from another machine (in CI, an
     # earlier job's runner), so they aren't comparable with this run's.
-    base_lat, head_lat = _median_durations(base, in_shared), _median_durations(head, in_shared)
+    base_tests = set(base_of.values())
+    base_lat = _median_durations(base, lambda t: t is None or t in base_tests)
+    head_lat = _median_durations(head, comparable)
     if base.from_cache:
         s.latency_skipped = "the base results came from the cache, possibly measured on another machine"
         head_lat = {}
     for name, after in head_lat.items():
         before = base_lat.get(name)
-        if before is None:
+        if before is None or before <= 0:
             continue
         if after >= before * th.latency_ratio and after - before >= th.latency_min_delta_ms:
             s.latency_regressions[name] = {"before_ms": round(before, 2), "after_ms": round(after, 2)}
@@ -395,24 +503,28 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     # Metrics: compare each series within the same test, which ran the same inputs.
     s.metrics_enabled = head.otel_metrics_enabled and bool(base.metrics or head.metrics)
     base_m, head_m = _metric_values(base), _metric_values(head)
-    shared_tests = set(base.node_ids) & set(head.node_ids)
+    error_like = {_series(p) for p in head.metrics if _error_like(p)}
     for (test, series), (kind, after) in head_m.items():
-        if test not in shared_tests:
+        if not comparable(test):
             continue
-        before = base_m.get((test, series), (kind, None))[1]
+        before = base_m.get((base_of.get(test, test) if test else None, series), (kind, None))[1]
         if before is None:
-            if kind == "counter" and after > 0 and ERROR_LIKE.search(series):
+            if kind == "counter" and after > 0 and series in error_like:
                 s.new_error_metrics[series] = s.new_error_metrics.get(series, 0) + after
             continue
         growth = after - before
-        if after >= before * th.metric_ratio and growth >= th.metric_min_delta:
+        # Ratios only mean something for positive values (an up-down counter can go negative).
+        if before > 0 and after >= before * th.metric_ratio and growth >= th.metric_min_delta:
             worst = s.metric_regressions.get(series)
             if worst is None or growth > worst["after"] - worst["before"]:
-                s.metric_regressions[series] = {"test": test, "kind": kind, "before": before, "after": after}
+                s.metric_regressions[series] = {"test": test or "(outside any test)", "kind": kind,
+                                                "before": before, "after": after}
 
     s.memory_enabled = bool(base.memory and head.memory)
     for test, after in head.memory.items():
-        before = base.memory.get(test)
+        if test is None or not comparable(test):
+            continue
+        before = base.memory.get(base_of[test])
         if before is None:
             continue
         if after >= before * th.memory_ratio and after - before >= th.memory_min_delta_mb * 2**20:
@@ -431,6 +543,7 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             )
 
     s.diff_lines = diff.size
-    s.code_diff_lines = sum(n for path, n in diff.file_lines.items() if not _is_test_file(path, tests_path))
+    s.code_diff_lines = sum(n for path, n in diff.file_lines.items()
+                            if not _is_test_file(path, tests_path) and not _is_docs_or_lockfile(path))
     s.files_changed = diff.files_changed
     return s

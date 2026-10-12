@@ -50,13 +50,13 @@ def test_warnings_and_info_logs_are_not_error_logging():
     assert hidden(removed={"pkg/a.py": ['log.warning("x")', 'log.info("y")']}) == {}
 
 
-def test_scoring_deducts_10_per_kind_up_to_20():
+def test_scoring_deducts_20_then_5_per_kind_up_to_30():
     def visibility(kinds):
         s = compute(RunResult("b"), RunResult("h"), Diff(), "tests")
         s.hidden_code = {k: ["x"] for k in kinds}
         return sum(p for sig, p, _ in score(s).deductions if sig == "Visibility")
-    assert visibility(["a"]) == 10
-    assert visibility(["a", "b", "c"]) == 20
+    assert visibility(["a"]) == 20
+    assert visibility(["a", "b", "c"]) == 30
 
 
 def git(repo: Path, *args):

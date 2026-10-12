@@ -71,7 +71,7 @@ def test_signal_and_score():
     diff = Diff(added_lines={"pkg/pay.py": {4, 5}}, head_source={"pkg/pay.py": SOURCE})
     s = compute(RunResult("b"), RunResult("h"), diff, "tests")
     assert s.hidden_code == {"errors silenced without a trace": ["pkg/pay.py:4: except Exception:"]}
-    assert any(d[0] == "Visibility" and d[1] == 10 for d in score(s).deductions)
+    assert any(d[0] == "Visibility" and d[1] == 20 for d in score(s).deductions)
 
 
 def test_test_files_are_ignored():

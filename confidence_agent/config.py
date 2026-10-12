@@ -60,18 +60,19 @@ class Weights:
     tests_failing: Tier = Tier(45, 5, 55)
     tests_flaky: Tier = Tier(5, 0, 5)
     no_tests: Tier = Tier(50, 0, 50)
-    tests_removed: Tier = Tier(15, 0, 15)
+    tests_removed: Tier = Tier(20, 5, 40)  # one removed test is enough to leave High
+    tests_skipped: Tier = Tier(20, 5, 40)  # a test that passed before, now skipped or xfailed
     coverage: Tier = Tier(30, 0, 30)  # proportional: cap is what 0% coverage costs
     error_logs: Tier = Tier(20, 5, 25)
     span_exceptions: Tier = Tier(10, 5, 15)
     latency: Tier = Tier(10, 10, 20)
-    visibility: Tier = Tier(10, 10, 20)
+    visibility: Tier = Tier(20, 5, 30)
     metrics: Tier = Tier(10, 5, 20)
     memory: Tier = Tier(10, 10, 20)
     size: Tier = Tier(5, 0, 5)
     dependencies: Tier = Tier(5, 0, 5)
-    security: Tier = Tier(10, 10, 20)
-    mutation: Tier = Tier(15, 0, 15)  # proportional: cap is what "no test noticed any mutant" costs
+    security: Tier = Tier(20, 10, 30)
+    mutation: Tier = Tier(20, 0, 20)  # proportional: cap is what "no test noticed any mutant" costs
 
 
 @dataclass

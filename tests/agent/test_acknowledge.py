@@ -110,9 +110,9 @@ def test_self_ack_by_label_is_ignored(tmp_path, monkeypatch):
 def test_acknowledging_one_kind_never_hides_another_with_the_same_name():
     s = Signals(tests_total=5, tests_removed=["t::old"], tests_newly_failing=list("abc"), tests_failed=list("abc"))
     r = score(s, acks={"tests-removed": "@lead"})
-    assert [d[0] for d in r.acknowledged] == ["Tests"] and r.acknowledged[0][1] == 15
+    assert [d[0] for d in r.acknowledged] == ["Tests"] and r.acknowledged[0][1] == 20
     assert r.value == 45 and r.band == "Low"  # the failing tests still count
-    assert score(s, acks={"tests": "@lead"}).value == 30  # the old display-name label matches nothing
+    assert score(s, acks={"tests": "@lead"}).value == 25  # the old display-name label matches nothing
 
 
 def test_failing_tests_and_missing_results_cant_be_acknowledged():
