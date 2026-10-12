@@ -69,6 +69,7 @@ class Weights:
     metrics: Tier = Tier(10, 5, 20)
     memory: Tier = Tier(10, 10, 20)
     size: Tier = Tier(5, 0, 5)
+    mutation: Tier = Tier(15, 0, 15)  # proportional: cap is what "no test noticed any mutant" costs
 
 
 @dataclass
@@ -80,6 +81,9 @@ class Thresholds:
     metric_min_delta: float = 3.0
     memory_ratio: float = 2.0
     memory_min_delta_mb: float = 5.0
+    max_mutants: int = 20  # 0 turns mutation testing off
+    mutant_timeout_s: float = 60.0
+    mutation_budget_s: float = 300.0  # all mutants together; the rest are skipped when it runs out
 
 
 @dataclass

@@ -36,6 +36,7 @@ class RunResult:
     # Files the tests imported from the user's repository instead of this checkout.
     outside_imports: List[str] = field(default_factory=list)
     rerun: Dict[str, str] = field(default_factory=dict)  # test id -> outcome when run again
+    mutation: Any = None  # mutate.MutationResult for the head run, if mutation testing ran
     exit_code: int = 0
     output_tail: str = ""
 
@@ -78,6 +79,13 @@ def _import_paths(workdir: Path) -> List[str]:
     if (workdir / "src").is_dir():
         paths.insert(0, str(workdir / "src"))
     return paths
+
+
+def junit_id(node_id: str) -> str:
+    """pytest's "tests/test_a.py::TestX::test_f" -> JUnit's "tests.test_a.TestX::test_f"."""
+    path, *rest = node_id.split("::")
+    module = path[:-3].replace("/", ".") if path.endswith(".py") else path
+    return "::".join([".".join([module, *rest[:-1]]), rest[-1]]) if rest else node_id
 
 
 def rerun_tests(workdir: Path, test_ids: List[str], tests_path: str) -> Dict[str, str]:
@@ -136,7 +144,7 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_mem
         cmd += ["-n", "0"]
     proc = subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
     subprocess.run(
-        [sys.executable, "-m", "coverage", "json", "-q", "-o", str(cov_json)],
+        [sys.executable, "-m", "coverage", "json", "-q", "--show-contexts", "-o", str(cov_json)],
         cwd=workdir, env=env, capture_output=True, text=True,
     )
 

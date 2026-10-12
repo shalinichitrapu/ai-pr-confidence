@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config, gitutil, llm, report, runner, scoring, signals
+from . import config, gitutil, llm, mutate, report, runner, scoring, signals
 
 
 def parse_args(argv=None):
@@ -29,6 +29,8 @@ def parse_args(argv=None):
     p.add_argument("--out", default="confidence-report", help="folder for report.md and result.json")
     p.add_argument("--no-memory", action="store_true",
                    help="skip per-test peak memory measurement (tracemalloc slows tests down)")
+    p.add_argument("--no-mutation", action="store_true",
+                   help="skip mutation testing of changed lines (it reruns tests once per mutant)")
     p.add_argument("--no-llm", action="store_true", help="skip the plain-English summary")
     p.add_argument("--llm-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     p.add_argument("--llm-model", default=os.environ.get("OLLAMA_MODEL", "qwen2.5:3b"))
@@ -89,6 +91,18 @@ def main(argv=None) -> int:
                 if newly:
                     print(f"[confidence] {len(newly)} test(s) newly failed; running the tests again to check for flakiness...")
                     runs["head"].rerun = runner.rerun_tests(wt, newly, args.tests)
+                limit = cfg.thresholds.max_mutants
+                targets = signals.mutation_targets(diff, runs["head"].coverage, args.tests, args.source, cfg)
+                if targets and limit > 0 and not args.no_mutation:
+                    print(f"[confidence] mutation testing up to {limit} change(s) to changed lines...")
+                    contexts = {p: runs["head"].coverage[p].get("contexts", {}) for p in targets}
+                    head = runs["head"]
+                    failing = {n for n in head.node_ids if runner.junit_id(n) in set(head.failed)}
+                    durations = {n: head.test_durations.get(runner.junit_id(n), 0.0) for n in head.node_ids}
+                    head.mutation = mutate.run_mutations(
+                        wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s,
+                        failing=failing, durations=durations, total_budget=cfg.thresholds.mutation_budget_s,
+                    )
             gitutil.remove_worktree(repo, wt)
     finally:
         for label in ("base", "head"):

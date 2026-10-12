@@ -29,6 +29,9 @@ class Signals:
     tests_newly_failing: List[str] = field(default_factory=list)
     tests_removed: List[str] = field(default_factory=list)
     tests_added: List[str] = field(default_factory=list)
+    mutants_tested: int = 0  # mutants that ran (killed + survived)
+    mutants_survived: List[str] = field(default_factory=list)  # changes no covering test noticed
+    mutation_note: str = ""  # why mutation testing didn't run or couldn't conclude
     tests_flaky: List[str] = field(default_factory=list)  # newly failed, then passed on a rerun
     tests_moved: Dict[str, str] = field(default_factory=dict)  # old id -> new id, same test name
 
@@ -116,6 +119,21 @@ def _renamed_test_id(test_id: str, renamed: Dict[str, str]) -> Optional[str]:
         if old_mod and (classname == old_mod or classname.startswith(old_mod + ".")):
             return f"{new_mod}{classname[len(old_mod):]}::{name}"
     return None
+
+
+def mutation_targets(diff: Diff, coverage: Dict[str, Any], tests_path: str, source: str,
+                     cfg: Optional[Config] = None) -> Dict[str, List[int]]:
+    """Changed, executed lines of source files: the lines worth mutating."""
+    cfg = cfg or Config()
+    targets = {}
+    for path, added in diff.added_lines.items():
+        if (not path.endswith(".py") or _is_test_file(path, tests_path) or not _in_source(path, source)
+                or cfg.ignored(path) or path not in coverage):
+            continue
+        lines = sorted(added & set(coverage[path].get("executed_lines", [])))
+        if lines:
+            targets[path] = lines
+    return targets
 
 
 def _is_test_file(path: str, tests_path: str) -> bool:
@@ -237,6 +255,10 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     th = cfg.thresholds
     s = Signals(otel_enabled=head.otel_enabled)
     diff, s.ignored_files = _without_ignored(diff, cfg)
+    if head.mutation is not None:
+        s.mutants_tested = head.mutation.killed + len(head.mutation.survived)
+        s.mutants_survived = list(head.mutation.survived)
+        s.mutation_note = head.mutation.note
     s.hidden_code = _hidden_code(diff, tests_path)
     removed = removed_silent_handlers(diff.base_source, diff.removed_lines)
     silenced = [

@@ -64,6 +64,11 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     if signals.uncovered_changes:
         details += ["**Changed lines no test executes**",
                     *[f"- `{p}` lines {_lines(l)}" for p, l in signals.uncovered_changes.items()], ""]
+    if signals.mutation_note:
+        details += [f"**Mutation testing** {signals.mutation_note}.", ""]
+    if signals.mutants_survived:
+        details += ["**Mutations no test noticed** (the line was changed like this and every covering test still passed)",
+                    *[f"- {m}" for m in signals.mutants_survived[:10]], ""]
     if signals.new_error_logs:
         details += ["**New ERROR logs** (signature × count)",
                     *[f"- `{k}` × {v}" for k, v in signals.new_error_logs.items()], ""]
