@@ -113,3 +113,12 @@ def test_metric_edge_cases():
 def test_coverage_message_names_the_untested_lines():
     r = score(Signals(tests_total=1, changed_code_lines=200, changed_lines_covered=197))
     assert ("Coverage", 1, "3 of 200 changed code lines don't run under any test") in r.deductions
+
+
+def test_a_function_moved_into_a_new_unimported_module_isnt_new_untested_code():
+    body = ["def archive(path):", "    return subprocess.run(['gzip', '-k', path], check=True).returncode"]
+    new = '"""Archiving."""\nimport subprocess\n\n\n' + "\n".join(body) + "\n"
+    d = Diff(added_lines={"app/archive.py": set(range(1, 7))}, head_source={"app/archive.py": new},
+             removed_text={"app/orders.py": body})
+    s = compute(run({J1: "passed"}), run({J1: "passed"}), d, "tests", "app")
+    assert s.changed_code_lines == 0

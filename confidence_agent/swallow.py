@@ -19,6 +19,21 @@ TEST_FAILURES = {"BaseException", "AssertionError", "Exception"}
 TRACE_CALLS = {"error", "exception", "critical", "warning", "warn", "fatal",
                "record_exception", "print_exc", "print_exception", "capture_exception"}
 LOGGER_NAMES = ("log", "logger", "logging")
+# Mentioning the error here isn't handling it: it's still dropped.
+QUIET_CALLS = {"debug", "info", "print"}
+
+
+def _quiet_call_args(handler: ast.ExceptHandler) -> set:
+    """ids of nodes inside the arguments of debug/info/print calls."""
+    inside = set()
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in QUIET_CALLS:
+                for arg in (*node.args, *[k.value for k in node.keywords]):
+                    inside.update(id(n) for n in ast.walk(arg))
+    return inside
 
 
 @dataclass(frozen=True)
@@ -50,11 +65,13 @@ def _walk_outside_nested_handlers(nodes):
 
 
 def _leaves_a_trace(handler: ast.ExceptHandler) -> bool:
+    quiet = _quiet_call_args(handler)
     for node in _walk_outside_nested_handlers(handler.body):
         if isinstance(node, ast.Raise):
             return True
         # The caught error is passed on: returned, stored, handed to a callback.
-        if handler.name and isinstance(node, ast.Name) and node.id == handler.name:
+        # (Only mentioned in a debug/info log or a print doesn't count.)
+        if handler.name and isinstance(node, ast.Name) and node.id == handler.name and id(node) not in quiet:
             return True
         if isinstance(node, ast.Call):
             func = node.func

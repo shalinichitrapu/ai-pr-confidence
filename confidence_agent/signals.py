@@ -279,13 +279,39 @@ def _is_docs_or_lockfile(path: str) -> bool:
     return not is_dependency_file(path) and any(fnmatch(path, p) for p in DOCS_AND_LOCKFILES)
 
 
-def _statement_lines(source: str) -> set:
-    """Lines that start a statement: what coverage would count as executable (roughly)."""
+def _boilerplate_lines(source: str) -> set:
+    """Import statements and docstrings: run on import, but not logic a test should check."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return set()
-    return {node.lineno for node in ast.walk(tree) if isinstance(node, ast.stmt)}
+    lines = set()
+    for node in ast.walk(tree):
+        is_docstring = (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, str))
+        if isinstance(node, (ast.Import, ast.ImportFrom)) or is_docstring:
+            lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return lines
+
+
+def _statement_lines(source: str) -> set:
+    """Lines that start a statement of logic in a file nothing imports.
+
+    Imports and docstrings aren't counted: a new module's boilerplate (or a module
+    a function was moved into) isn't untested logic.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    lines = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.stmt) or isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue  # a docstring
+        lines.add(node.lineno)
+    return lines
 
 
 def _moved_lines(diff: Diff, tests_path: str) -> Dict[str, set]:
@@ -452,7 +478,7 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         if not _in_source(path, source):
             # Coverage was never measured here, so it can't say whether tests run it.
             continue
-        added = added - moved.get(path, set())
+        added = added - moved.get(path, set()) - _boilerplate_lines(diff.head_source.get(path, ""))
         cov = head.coverage.get(path)
         if cov is None:
             # coverage.py never saw the file: no test imported it at all. Count its

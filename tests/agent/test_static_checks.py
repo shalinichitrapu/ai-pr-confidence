@@ -130,3 +130,9 @@ def test_ignore_setting_applies_to_pyproject_dependency_entries():
     d = Diff(files_changed=["pyproject.toml"], dependency_changes=["pyproject.toml (poetry): added x ^1"])
     s = compute(RunResult("b"), RunResult("h"), d, "tests", ".", parse('[tool.confidence]\nignore = ["pyproject.toml"]\n'))
     assert s.dependency_changes == []
+
+
+def test_mentioning_the_error_in_a_debug_log_isnt_handling_it():
+    src = ("def total(lines):\n    try:\n        return price(lines)\n    except Exception as exc:\n"
+           "        logger.debug('could not price order: %s', exc)\n        return 0.0\n")
+    assert silent_excepts(src, [4, 5, 6]) == [4]
