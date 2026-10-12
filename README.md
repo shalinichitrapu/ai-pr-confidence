@@ -154,6 +154,7 @@ tests = "tests"                # default for --tests
 min_score = 60                 # default for --min-score
 ignore = ["migrations/*", "*/migrations/*", "*_pb2.py"]  # changed files never scored (glob; * also matches /)
 expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures shown but not scored
+allow_self_ack = false         # may a PR's author acknowledge their own deductions?
 
 [tool.confidence.bands]
 high = 85
@@ -214,6 +215,7 @@ name: AI change confidence
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -222,6 +224,9 @@ permissions:
 
 jobs:
   score:
+    concurrency:  # a newer event cancels an older run
+      group: confidence-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -253,6 +258,24 @@ jobs:
 
 The agent posts a single comment and updates it on each new push. Add
 `--min-score 60` to fail the check below 60, so you can make it required before merging.
+
+**Acknowledging a deduction.** When a deduction is expected (say a metric grows
+because of a wanted feature), a reviewer can add a label named
+`confidence-ack:<key>`; each deduction's row in the report shows its key, e.g.
+`confidence-ack:metrics` or `confidence-ack:tests-removed`. Each kind of deduction has
+its own key, so acknowledging a removed test never hides a failing one. The workflow
+reruns when labels change (any label: a skipped run would show as a passing check).
+A label with an unknown key is ignored, with a note in the report. The deduction stays in the report,
+shown as "0 (−10 acknowledged by @reviewer)", and no longer counts toward the score or
+`--min-score` until the label is removed. Newly failing tests and missing test results
+can't be acknowledged. Labels added by the pull request's own author are ignored
+unless `allow_self_ack = true` is set in `[tool.confidence]`. Locally, `--ack
+metrics,size` does the same.
+
+The workflow runs the agent from the pull request's own checkout, so for a pull
+request from a branch in your repository, its author could change the workflow or
+the agent itself. Treat the score as a review aid, not a security boundary; branch
+protection and code review still decide what merges.
 
 Pull requests from forks get a read-only token, so GitHub refuses the comment.
 The agent prints a warning instead of failing, and the report still appears on

@@ -101,6 +101,7 @@ class Config:
     min_score: Optional[int] = None
     ignore: List[str] = field(default_factory=list)
     expected_errors: List[str] = field(default_factory=list)
+    allow_self_ack: bool = False  # may a PR's author acknowledge their own deductions?
     bands: Bands = field(default_factory=Bands)
     thresholds: Thresholds = field(default_factory=Thresholds)
     weights: Weights = field(default_factory=Weights)
@@ -164,7 +165,8 @@ def parse(text: str) -> Config:
     cfg = Config()
     if not table:
         return cfg
-    top = ("source", "tests", "min_score", "ignore", "expected_errors", "bands", "thresholds", "weights")
+    top = ("source", "tests", "min_score", "ignore", "expected_errors", "allow_self_ack",
+           "bands", "thresholds", "weights")
     _check_keys(table, top, "[tool.confidence]")
 
     for key in ("source", "tests"):
@@ -178,6 +180,10 @@ def parse(text: str) -> Config:
         cfg.ignore = _strings(table["ignore"], "[tool.confidence] ignore")
     if "expected_errors" in table:
         cfg.expected_errors = _strings(table["expected_errors"], "[tool.confidence] expected_errors")
+    if "allow_self_ack" in table:
+        if not isinstance(table["allow_self_ack"], bool):
+            raise ConfigError("[tool.confidence] allow_self_ack must be true or false")
+        cfg.allow_self_ack = table["allow_self_ack"]
 
     for name, target, kind in (("bands", cfg.bands, int), ("thresholds", cfg.thresholds, (int, float))):
         where = f"[tool.confidence.{name}]"
