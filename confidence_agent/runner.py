@@ -78,6 +78,13 @@ def _import_paths(workdir: Path) -> List[str]:
     return paths
 
 
+def junit_id(node_id: str) -> str:
+    """pytest's "tests/test_a.py::TestX::test_f" -> JUnit's "tests.test_a.TestX::test_f"."""
+    path, *rest = node_id.split("::")
+    module = path[:-3].replace("/", ".") if path.endswith(".py") else path
+    return "::".join([".".join([module, *rest[:-1]]), rest[-1]]) if rest else node_id
+
+
 def rerun_tests(workdir: Path, test_ids: List[str], tests_path: str) -> Dict[str, str]:
     """Run the same tests again, in the same order, and return the outcomes of test_ids.
 

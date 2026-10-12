@@ -31,6 +31,7 @@ class Signals:
     tests_added: List[str] = field(default_factory=list)
     mutants_tested: int = 0  # mutants that ran (killed + survived)
     mutants_survived: List[str] = field(default_factory=list)  # changes no covering test noticed
+    mutation_note: str = ""  # why mutation testing didn't run or couldn't conclude
     tests_flaky: List[str] = field(default_factory=list)  # newly failed, then passed on a rerun
     tests_moved: Dict[str, str] = field(default_factory=dict)  # old id -> new id, same test name
 
@@ -255,6 +256,7 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     if head.mutation is not None:
         s.mutants_tested = head.mutation.killed + len(head.mutation.survived)
         s.mutants_survived = list(head.mutation.survived)
+        s.mutation_note = head.mutation.note
     s.hidden_code = _hidden_code(diff, tests_path)
     removed = Counter(line.strip() for lines in diff.removed_text.values() for line in lines if line.strip())
     silenced = [

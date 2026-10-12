@@ -93,8 +93,12 @@ def main(argv=None) -> int:
                 if targets and limit > 0 and not args.no_mutation:
                     print(f"[confidence] mutation testing up to {limit} change(s) to changed lines...")
                     contexts = {p: runs["head"].coverage[p].get("contexts", {}) for p in targets}
-                    runs["head"].mutation = mutate.run_mutations(
-                        wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s
+                    head = runs["head"]
+                    failing = {n for n in head.node_ids if runner.junit_id(n) in set(head.failed)}
+                    durations = {n: head.test_durations.get(runner.junit_id(n), 0.0) for n in head.node_ids}
+                    head.mutation = mutate.run_mutations(
+                        wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s,
+                        failing=failing, durations=durations,
                     )
             gitutil.remove_worktree(repo, wt)
     finally:
