@@ -90,28 +90,90 @@ class Signals:
 # counted net (removed minus added, or added minus removed for pragmas) across
 # the whole diff, so code that merely moved between files is not flagged.
 PRAGMA = re.compile(r"#\s*pragma:\s*no\s*cover", re.IGNORECASE)
+ERROR_LOG_CALL = re.compile(r"(?:\b|_)log\w*\.(error|exception|critical)\(|getLogger\([^)]*\)\.(error|exception|critical)\(",
+                            re.IGNORECASE)
 HIDING_PATTERNS = {
-    "coverage exclusions added": (PRAGMA, "added"),
-    "error logging removed": (re.compile(r"\blog\w*\.(error|exception|critical)\(", re.IGNORECASE), "removed"),
-    "tracing removed": (re.compile(r"\b(start_as_current_span|start_span|record_exception|set_status)\("), "removed"),
-    "metric instruments removed": (re.compile(r"\bcreate_(counter|up_down_counter|histogram|gauge)\("), "removed"),
+    "coverage exclusions added": (PRAGMA, "added", "code"),
+    "error logging removed": (ERROR_LOG_CALL, "removed", "code"),
+    "tracing removed": (re.compile(r"\b(start_as_current_span|start_span|record_exception)\(|"
+                                   r"\bset_status\(.*ERROR"), "removed", "code"),
+    "metric instruments removed": (re.compile(r"\bcreate_(counter|up_down_counter|histogram|gauge)\("), "removed", "code"),
+    # An assertion that compared values, replaced by a weaker one or none.
+    # (`is None` / `is not None` checks don't pin a value, so they don't count as comparisons.)
+    "test assertions weakened": (re.compile(r"^\s*(assert\b.*(==|!=|<=|>=|<|>|\bin\b)|self\.assert(Equal|In|Raises|Less|Greater|AlmostEqual))"),
+                                 "removed", "tests"),
 }
+COLLECTION_TRICKS = re.compile(r"collect_ignore|pytest_collection_modifyitems|pytest\.skip\(|pytest\.mark\.(skip|xfail)"
+                               r"|deselect|pytest_ignore_collect")
+
+
+def _deleted_definition_lines(diff: Diff) -> Dict[str, set]:
+    """Base lines of functions, classes and files this change deleted entirely.
+
+    Removing instrumentation together with the code it instrumented is dead-code
+    removal, not hiding.
+    """
+    out: Dict[str, set] = {}
+    for path, removed in diff.removed_lines.items():
+        if path not in diff.added_lines and path not in diff.renamed.values():
+            out[path] = set(removed)  # the whole file was deleted
+            continue
+        source = diff.base_source.get(path)
+        if not source:
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+                span = set(range(first, (node.end_lineno or node.lineno) + 1))
+                if span <= removed:
+                    out.setdefault(path, set()).update(span)
+    return out
+
+
+def _removed_with_numbers(diff: Diff, path: str):
+    """(base line number, text) for each removed line, when they line up."""
+    numbers, texts = sorted(diff.removed_lines.get(path, ())), diff.removed_text.get(path, [])
+    return list(zip(numbers, texts)) if len(numbers) == len(texts) else [(None, t) for t in texts]
 
 
 def _hidden_code(diff: Diff, tests_path: str) -> Dict[str, List[str]]:
     found: Dict[str, List[str]] = {}
-    for kind, (pattern, direction) in HIDING_PATTERNS.items():
+    deleted = _deleted_definition_lines(diff)
+    for kind, (pattern, direction, where) in HIDING_PATTERNS.items():
         hits = {"added": [], "removed": []}
-        for side, texts in (("added", diff.added_text), ("removed", diff.removed_text)):
-            for path, lines in texts.items():
-                if not path.endswith(".py") or _is_test_file(path, tests_path):
-                    continue
-                hits[side] += [f"{path}: {line.strip()}" for line in lines if pattern.search(line)]
+
+        def wanted(path):
+            return path.endswith(".py") and (_is_test_file(path, tests_path) == (where == "tests"))
+
+        for path, lines in diff.added_text.items():
+            if wanted(path):
+                hits["added"] += [f"{path}: {line.strip()}" for line in lines if pattern.search(line)]
+        for path in diff.removed_text:
+            if wanted(path):
+                gone = deleted.get(path, set())
+                hits["removed"] += [f"{path}: {text.strip()}" for n, text in _removed_with_numbers(diff, path)
+                                    if pattern.search(text) and n not in gone]
         other = "removed" if direction == "added" else "added"
         net = len(hits[direction]) - len(hits[other])
         if net > 0:
             found[kind] = hits[direction][:net]
+    tricks = [f"{path}: {line.strip()}" for path, lines in diff.added_text.items()
+              if path.rsplit("/", 1)[-1] == "conftest.py" for line in lines if COLLECTION_TRICKS.search(line)]
+    tricks += [f"pytest settings changed in {c}" for c in diff.pytest_config_changes]
+    if tricks:
+        found["test collection or configuration changed"] = tricks
     return found
+
+
+def _drops_error_handling(diff: Diff, path: str) -> bool:
+    """Did this change remove more `raise` / error-logging lines than it added in this file?"""
+    def count(lines):
+        return sum(1 for line in lines if re.match(r"\s*raise\b", line) or ERROR_LOG_CALL.search(line))
+    return count(diff.removed_text.get(path, [])) > count(diff.added_text.get(path, []))
 
 
 def _module(path: str) -> str:
@@ -311,7 +373,9 @@ def _without_ignored(diff: Diff, cfg: Config) -> Tuple[Diff, List[str]]:
         added_text=keep(diff.added_text),
         removed_text=keep(diff.removed_text),
         head_source=keep(diff.head_source),
-        dependency_changes=[c for c in diff.dependency_changes if not cfg.ignored(c.split(":", 1)[0])],
+        pytest_config_changes=list(diff.pytest_config_changes),
+        dependency_changes=[c for c in diff.dependency_changes
+                            if not cfg.ignored(c.split(":", 1)[0].split(" (", 1)[0])],
         removed_lines=keep(diff.removed_lines),
         base_source=keep(diff.base_source),
     )
@@ -329,15 +393,20 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         s.mutants_survived = list(head.mutation.survived)
         s.mutation_note = head.mutation.note
     s.hidden_code = _hidden_code(diff, tests_path)
-    removed = removed_silent_handlers(diff.base_source, diff.removed_lines)
-    silenced = [
-        finding
-        for path, text in sorted(diff.head_source.items())
-        if not _is_test_file(path, tests_path)
-        for finding in new_silent_excepts(path, text, diff.added_lines.get(path, ()), removed)
-    ]
+    removed = removed_silent_handlers(diff.base_source, diff.removed_lines,
+                                      skip=lambda path: _is_test_file(path, tests_path))
+    silenced, in_tests = [], []
+    for path, text in sorted(diff.head_source.items()):
+        changed = diff.added_lines.get(path, ())
+        if _is_test_file(path, tests_path):
+            in_tests += new_silent_excepts(path, text, changed, Counter(), in_test=True)
+        else:
+            silenced += new_silent_excepts(path, text, changed, removed,
+                                           narrow_too=_drops_error_handling(diff, path))
     if silenced:
         s.hidden_code["errors silenced without a trace"] = silenced
+    if in_tests:
+        s.hidden_code["test failures silenced"] = in_tests
 
     s.dependency_changes = list(diff.dependency_changes)
     s.risky_code = [

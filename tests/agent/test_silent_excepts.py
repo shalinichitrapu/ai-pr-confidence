@@ -59,7 +59,8 @@ def test_only_silent_broad_handlers_are_found():
 
 def test_only_handlers_on_changed_lines_count():
     assert silent_excepts(SOURCE, [10]) == [10]
-    assert silent_excepts(SOURCE, [1, 2, 3, 5]) == []  # the except line itself didn't change
+    assert silent_excepts(SOURCE, [1, 2, 3]) == []  # only the try block changed
+    assert silent_excepts(SOURCE, [5]) == [4]  # a body-only change (e.g. raise -> pass) counts
 
 
 def test_unparsable_source_is_skipped():
@@ -74,10 +75,12 @@ def test_signal_and_score():
     assert any(d[0] == "Visibility" and d[1] == 20 for d in score(s).deductions)
 
 
-def test_test_files_are_ignored():
+def test_in_tests_only_silenced_assertion_failures_are_reported():
     from confidence_agent.signals import compute
     diff = Diff(added_lines={"tests/test_pay.py": {4}}, head_source={"tests/test_pay.py": SOURCE})
-    assert compute(RunResult("b"), RunResult("h"), diff, "tests").hidden_code == {}
+    found = compute(RunResult("b"), RunResult("h"), diff, "tests").hidden_code
+    # `except Exception: pass` in a test also swallows AssertionError.
+    assert list(found) == ["test failures silenced"]
 
 
 def git(repo, *args):
