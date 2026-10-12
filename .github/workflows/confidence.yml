@@ -35,6 +35,13 @@ jobs:
       # GitHub's runners can't reach the model on your home desktop, so CI posts
       # the score without the plain-English summary. Run scripts/score_pr.sh on
       # your Mac to post the same comment with the local model's summary.
+      - name: Reuse base-branch test results between runs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/confidence-agent
+          key: confidence-base-${{ runner.os }}-${{ github.event.pull_request.base.sha }}
+          restore-keys: confidence-base-${{ runner.os }}-
+
       - name: Score this pull request
         env:
           GH_TOKEN: ${{ github.token }}

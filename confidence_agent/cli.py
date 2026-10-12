@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config, gitutil, llm, mutate, report, runner, scoring, signals
+from . import cache, config, gitutil, llm, mutate, report, runner, scoring, signals
 
 
 def parse_args(argv=None):
@@ -31,6 +31,9 @@ def parse_args(argv=None):
                    help="skip per-test peak memory measurement (tracemalloc slows tests down)")
     p.add_argument("--no-mutation", action="store_true",
                    help="skip mutation testing of changed lines (it reruns tests once per mutant)")
+    p.add_argument("--cache-dir", type=Path, default=None,
+                   help="where to keep base-run results between runs (default: ~/.cache/confidence-agent)")
+    p.add_argument("--no-cache", action="store_true", help="always rerun the base tests")
     p.add_argument("--no-llm", action="store_true", help="skip the plain-English summary")
     p.add_argument("--llm-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     p.add_argument("--llm-model", default=os.environ.get("OLLAMA_MODEL", "qwen2.5:3b"))
@@ -80,7 +83,16 @@ def main(argv=None) -> int:
     tmp = Path(tempfile.mkdtemp(prefix="confidence-wt-"))
     runs = {}
     try:
+        cache_dir = args.cache_dir or cache.default_dir()
+        base_key = cache.key(base_sha, args.source, args.tests, not args.no_memory)
+        if not args.no_cache:
+            cached = cache.load(cache_dir, base_key)
+            if cached is not None:
+                print(f"[confidence] using cached results for base {base_sha[:7]}")
+                runs["base"] = cached
         for label, sha in (("base", base_sha), ("head", head_sha)):
+            if label in runs:
+                continue
             wt = tmp / label
             gitutil.add_worktree(repo, sha, wt)
             print(f"[confidence] running tests on {label}...")
@@ -106,6 +118,10 @@ def main(argv=None) -> int:
                         wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s,
                         failing=failing, durations=durations, total_budget=cfg.thresholds.mutation_budget_s,
                     )
+            # Only a clean base run is reused: a failure saved once (a flake, an
+            # environment problem) would excuse that test failing on every later PR.
+            if label == "base" and not args.no_cache and runs["base"].tests and not runs["base"].failed:
+                cache.save(cache_dir, base_key, runs["base"])
             gitutil.remove_worktree(repo, wt)
     finally:
         for label in ("base", "head"):

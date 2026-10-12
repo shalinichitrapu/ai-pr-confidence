@@ -37,6 +37,7 @@ class RunResult:
     outside_imports: List[str] = field(default_factory=list)
     rerun: Dict[str, str] = field(default_factory=dict)  # test id -> outcome when run again
     mutation: Any = None  # mutate.MutationResult for the head run, if mutation testing ran
+    from_cache: bool = False  # loaded from the base-run cache rather than run now
     exit_code: int = 0
     output_tail: str = ""
 
