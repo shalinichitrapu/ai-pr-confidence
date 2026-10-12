@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-time setup: create a GitHub repo from this folder, push every demo branch,
+# One-time setup for a fresh copy with no `origin` remote yet (it creates one):
+# create a GitHub repo from this folder, push every demo branch,
 # and open one pull request per branch. The GitHub Action then scores each PR.
 #
 #   scripts/publish_demo.sh                 # public repo named ai-pr-confidence

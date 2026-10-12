@@ -10,11 +10,11 @@ PR="${1:?usage: scripts/score_pr.sh <pr-number>}"
 cd "$(dirname "$0")/.."
 
 BASE=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
-HEAD_BRANCH=$(gh pr view "$PR" --json headRefName --jq .headRefName)
-git fetch -q origin "$BASE" "$HEAD_BRANCH"
+# pull/N/head works for pull requests from forks too.
+git fetch -q origin "$BASE" "pull/$PR/head:confidence-pr-$PR"
 
 python -m confidence_agent \
   --base "origin/$BASE" \
-  --head "origin/$HEAD_BRANCH" \
+  --head "confidence-pr-$PR" \
   --source studybuddy,confidence_agent \
   --post-to-pr "$PR"
