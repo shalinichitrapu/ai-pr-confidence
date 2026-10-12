@@ -24,6 +24,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # the agent needs the base branch history
+          # Don't leave the token in .git/config, where the pull request's tests could read it.
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:

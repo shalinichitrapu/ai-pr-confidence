@@ -165,14 +165,19 @@ tests in a single process. Coverage and telemetry can't see parallel workers.
 **Your project's own setup.** The agent uses its own coverage settings, so a
 `.coveragerc` or `[tool.coverage]` (including one a pull request edits) can't omit
 or exclude the code being scored; use `[tool.confidence] ignore` for files you
-don't want scored. If your tests set up OpenTelemetry themselves, the agent adds
+don't want scored. Only `# pragma: no cover` (in any spelling coverage accepts)
+excludes a line, and adding one is flagged. This also means your own
+`exclude_also` patterns (e.g. `raise NotImplementedError`) aren't applied, so such
+lines can show as untested. If your tests set up OpenTelemetry themselves, the agent adds
 its span processor to your tracer provider (if your project sets its own *meter*
 provider, metrics are off, and the report doesn't claim otherwise). Logs are
 captured even if your logging config removes handlers or stops propagation.
-Changes to pytest settings (`addopts`, `testpaths`, ...) in pyproject.toml,
-pytest.ini, tox.ini or setup.cfg are flagged, since they can stop tests from running.
-CI credentials (`GH_TOKEN`, `GITHUB_TOKEN`, Actions tokens) are removed from the
-environment your tests run in.
+Changes to the pytest settings that decide which tests run (`addopts`, `testpaths`,
+`python_files`, `norecursedirs`, `xfail_strict`, ...) in pyproject.toml, pytest.ini,
+tox.ini or setup.cfg are flagged; `markers`, `filterwarnings` and the like aren't.
+CI credentials (`GH_TOKEN`, `GITHUB_TOKEN`, Actions tokens) and the files that set
+later steps' environment and the job summary are removed from the environment your
+tests run in.
 
 ## Configuration
 
@@ -308,25 +313,31 @@ because of a wanted feature), a reviewer can add a label named
 its own key, so acknowledging a removed test never hides a failing one. The workflow
 reruns when labels change (any label: a skipped run would show as a passing check).
 A label with an unknown key is ignored, with a note in the report. The deduction stays in the report,
-shown as "0 (−10 acknowledged by `@reviewer`)", and no longer counts toward the score or
+shown as "0 (−10 acknowledged by `reviewer`)", and no longer counts toward the score or
 `--min-score` until the label is removed. Newly failing tests and missing test results
 can't be acknowledged. Labels added by the pull request's own author are ignored
-unless `allow_self_ack = true` is set in `[tool.confidence]`. Locally, `--ack
+unless `allow_self_ack = true` is set in `[tool.confidence]`, and labels added by a
+bot account (such as the job's own token, `github-actions[bot]`) are always ignored. Locally, `--ack
 metrics,size` does the same.
 
-The pull request's tests run without the job's GitHub token, so test code can't add
-labels or edit the comment. But the workflow itself runs from the pull request's
-checkout, so for a pull request from a branch in your repository, its author could
+The pull request's tests run without the job's GitHub token in their environment,
+and the workflow checks out with `persist-credentials: false` so the token isn't
+left in `.git/config` either. That's defense in depth, not isolation: the tests run
+in the same job as the agent (on Linux a process can read its parent's starting
+environment), which is why bot-added labels never count. The workflow itself runs
+from the pull request's checkout, so for a pull request from a branch in your repository, its author could
 change the workflow or the agent. Treat the score as a review aid, not a security
 boundary; branch protection and code review still decide what merges.
 
 Pull requests from forks get a read-only token, so GitHub refuses the comment.
 The agent prints a warning instead of failing, and the report still appears on
-the run's summary page.
+the run's summary page. That page is written in the same job that ran the fork's
+code, so treat a fork's summary as a convenience, and rescore it yourself (below)
+before trusting it. Very long reports are clipped to fit GitHub's comment limit.
 
 GitHub's servers can't reach a model on your own network, so CI comments have no
 summary. To add one to a pull request's comment, run the agent from your own
-machine with your model running. This needs the [GitHub CLI](https://cli.github.com)
+machine with your model running; it updates the comment CI posted. This needs the [GitHub CLI](https://cli.github.com)
 logged in (`gh auth login`):
 
 ```bash
@@ -395,7 +406,8 @@ down to at most four plain bullets: links (including bare `www.` addresses),
 reference links, HTML and code fences are removed, and `@mentions` don't notify
 anyone. Treat the summary as a hint, and the table as the evidence. The rest of
 the comment escapes everything the pull request controls (test names, log messages,
-file paths), so it can't add rows or headings to the report.
+span names, file paths, config keys), so it can't add rows, headings, links,
+images or @mentions to the report.
 
 ### Setting up a local model (free)
 

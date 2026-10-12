@@ -101,7 +101,9 @@ def junit_id(node_id: str) -> str:
 # could use it, e.g. to acknowledge its own deductions. Other variables (such as
 # a database password integration tests need) are left alone.
 SECRET_ENV = re.compile(r"^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|ACTIONS_RUNTIME_TOKEN"
-                        r"|ACTIONS_ID_TOKEN_REQUEST_TOKEN|ACTIONS_ID_TOKEN_REQUEST_URL|ACTIONS_CACHE_URL)$")
+                        r"|ACTIONS_ID_TOKEN_REQUEST_TOKEN|ACTIONS_ID_TOKEN_REQUEST_URL|ACTIONS_CACHE_URL"
+                        # Files that set later steps' environment, outputs and the job summary.
+                        r"|GITHUB_ENV|GITHUB_OUTPUT|GITHUB_PATH|GITHUB_STATE|GITHUB_STEP_SUMMARY)$")
 
 # The agent's own coverage settings. The project's (and especially the pull
 # request's) .coveragerc / [tool.coverage] could omit or exclude the code being
@@ -148,8 +150,10 @@ def run_pytest(cmd: List[str], optional: List[str], **kw) -> subprocess.Complete
     kw.setdefault("text", True)
     kw.setdefault("errors", "replace")
     proc = subprocess.run(cmd + optional, **kw)
-    if proc.returncode == 4 and optional:
-        proc = subprocess.run(cmd, **kw)
+    if proc.returncode == 4 and "-n" in optional:
+        # Only "-n 0" can be unknown; keep the no-shuffle flags so the order stays fixed.
+        i = optional.index("-n")
+        proc = subprocess.run(cmd + optional[:i] + optional[i + 2:], **kw)
     return proc
 
 

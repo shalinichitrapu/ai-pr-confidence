@@ -48,7 +48,7 @@ def test_only_our_own_comment_is_updated(monkeypatch, tmp_path):
             return subprocess.CompletedProcess(cmd, 1, stdout="")  # the Actions token can't read /user
         if "--paginate" in cmd:
             jq = cmd[cmd.index("--jq") + 1]
-            assert '.user.login == "github-actions[bot]"' in jq
+            assert '.user.login | IN(["github-actions[bot]"][])' in jq
             return subprocess.CompletedProcess(cmd, 0, stdout="")
         return subprocess.CompletedProcess(cmd, 0, stdout="")
 

@@ -158,7 +158,8 @@ def config_repo(tmp_path, base_toml, change_toml=None, base_extra=None):
 def run_cli(repo, out):
     code = cli.main(["--repo", str(repo), "--base", "main", "--head", "change", "--no-llm", "--no-memory",
                      "--out", str(out)])
-    return code, (out / "report.md").read_text()
+    # Rendered text: the report escapes Markdown in warnings (\\[tool.confidence\\]).
+    return code, re.sub(r"\\(.)", r"\1", (out / "report.md").read_text())
 
 
 def test_settings_come_from_the_tip_of_the_base_branch(tmp_path):

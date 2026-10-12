@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional, Sequence
 
 MARKER = "<!-- ai-pr-confidence -->"
@@ -15,17 +16,32 @@ def _code(value) -> str:
     span and inject Markdown (fake rows, headings, links) into the comment.
     """
     text = " ".join(str(value).replace("`", "ˋ").split())
+    if len(text) > MAX_VALUE:
+        text = text[:MAX_VALUE] + "…"
     return f"`{text}`"
 
 
+MAX_VALUE = 300  # characters of any one value the pull request controls
+_MARKDOWN = re.compile(r"([\\`*_\[\]!~#|])")
+
+
+def _plain(text) -> str:
+    """One line of text with Markdown and HTML neutralized: no links, images, emphasis
+    or @mentions (span names and config keys come from the pull request)."""
+    text = " ".join(str(text).split())
+    text = _MARKDOWN.sub(r"\\\1", text).replace("<", "&lt;").replace(">", "&gt;").replace("@", "@\u200b")
+    # No bare-URL autolinks either.
+    return re.sub(r"(?i)(://|\bwww\.)", lambda m: m.group(1)[0] + "\u200b" + m.group(1)[1:], text)
+
+
 def _cell(text) -> str:
-    """Plain text safe inside a table cell: one line, no pipes or HTML."""
-    return " ".join(str(text).split()).replace("|", "\\|").replace("<", "&lt;").replace(">", "&gt;")
+    """Plain text safe inside a table cell: one line, no pipes, HTML or Markdown."""
+    return _plain(text)
 
 
 def _line(text) -> str:
     """Plain text safe as one Markdown line (warnings, notes)."""
-    return " ".join(str(text).split()).replace("<", "&lt;")
+    return _plain(text)
 
 
 def _lines(nums):

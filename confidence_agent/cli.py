@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 from . import cache, config, gitutil, llm, mutate, report, runner, scoring, signals
@@ -53,7 +55,34 @@ def parse_args(argv=None):
 COULDNT_RUN = 3
 
 
+def label_acks(labels: Dict[str, str], author: Optional[str], allow_self_ack: bool) -> Tuple[Dict[str, str], List[str]]:
+    """Which confidence-ack labels count: ({signal: who}, notes about the ones ignored)."""
+    acks, notes = {}, []
+    for signal, who in labels.items():
+        if who.endswith("[bot]"):
+            # The job's own token acts as github-actions[bot], and the pull
+            # request's code runs in the same job: a label it adds isn't a review.
+            notes.append(f"Ignored confidence-ack:{signal}: added by an automated account ({who}), "
+                         "not a reviewer.")
+        elif who == author and not allow_self_ack:
+            notes.append(f"Ignored confidence-ack:{signal}: added by the pull request's author "
+                         f"({who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
+        else:
+            acks[signal] = who
+    return acks, notes
+
+
 def main(argv=None) -> int:
+    """Exit 0 (scored), 1 (below --min-score), 2 (this change's config is broken), 3 (couldn't run)."""
+    try:
+        return _main(argv)
+    except Exception:  # an agent bug or an unexpected environment isn't a low score
+        traceback.print_exc()
+        print("[confidence] the agent couldn't finish; see the error above.")
+        return COULDNT_RUN
+
+
+def _main(argv=None) -> int:
     args = parse_args(argv)
     repo = Path(args.repo).resolve()
     try:
@@ -149,7 +178,6 @@ def main(argv=None) -> int:
         for label in ("base", "head"):
             gitutil.remove_worktree(repo, tmp / label)
         shutil.rmtree(tmp, ignore_errors=True)
-        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
 
     if not runs["head"].tests:
         print("[confidence] no test results from head run. pytest output:\n" + runs["head"].output_tail)
@@ -163,12 +191,8 @@ def main(argv=None) -> int:
     if args.post_to_pr:
         from .github import acknowledgements
         labels, author = acknowledgements(repo, args.post_to_pr)
-        for signal, who in labels.items():
-            if who == author and not cfg.allow_self_ack:
-                notes.append(f"Ignored confidence-ack:{signal}: added by the pull request's author "
-                             f"({who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
-            else:
-                acks[signal] = who
+        from_labels, notes = label_acks(labels, author, cfg.allow_self_ack)
+        acks.update(from_labels)
     for key in sorted(set(acks) - scoring.KEYS):
         notes.append(f"Ignored confidence-ack:{key}: no deduction has that key. Use the key shown on the "
                      "deduction's row, e.g. tests-removed or metrics.")
