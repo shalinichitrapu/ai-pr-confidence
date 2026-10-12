@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 PLUGIN_MODULE = "confidence_pytest_plugin"
+# Plugins that shuffle test order. The before, after and rerun runs must use the
+# same order, or an order-dependent failure could pass on the rerun by chance.
+NO_SHUFFLE = ["-p", "no:randomly", "-p", "no:random_order"]
 
 
 @dataclass
@@ -102,7 +105,7 @@ def rerun_tests(workdir: Path, test_ids: List[str], tests_path: str) -> Dict[str
     env["PYTHONPATH"] = os.pathsep.join(p for p in (*_import_paths(workdir), env.get("PYTHONPATH", "")) if p)
     env.pop("PYTEST_ADDOPTS", None)
     cmd = [sys.executable, "-m", "pytest", tests_path, "-q",
-           f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider"]
+           f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider", *NO_SHUFFLE, *NO_SHUFFLE]
     if importlib.util.find_spec("xdist") is not None:
         cmd += ["-n", "0"]
     subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
@@ -134,7 +137,7 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_mem
     cmd = [
         sys.executable, "-m", "coverage", "run", f"--source={source}",
         "-m", "pytest", tests_path, "-q", "-p", PLUGIN_MODULE,
-        f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider",
+        f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider", *NO_SHUFFLE,
     ]
     if importlib.util.find_spec("xdist") is not None:
         # Parallel workers are separate processes that coverage and the plugin

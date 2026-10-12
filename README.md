@@ -159,7 +159,7 @@ optional; command-line flags win over the file.
 source = "my_package"          # default for --source
 tests = "tests"                # default for --tests
 min_score = 60                 # default for --min-score
-ignore = ["*migrations/*", "*_pb2.py"]                # changed files that are never scored (glob; * also matches /)
+ignore = ["migrations/*", "*/migrations/*", "*_pb2.py"]  # changed files never scored (glob; * also matches /)
 expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures shown but not scored
 allow_self_ack = false         # may a PR's author acknowledge their own deductions?
 
@@ -176,7 +176,8 @@ metric_min_delta = 3.0
 memory_ratio = 2.0
 memory_min_delta_mb = 5.0
 max_mutants = 20               # mutation testing budget per run; 0 turns it off
-mutant_timeout_s = 60.0
+mutant_timeout_s = 60.0       # each mutant also gets at least 5x its tests' normal time
+mutation_budget_s = 300.0      # all mutants together; the rest are skipped when it runs out
 
 [tool.confidence.weights]      # [first finding, each additional, maximum]
 tests_failing = [45, 5, 55]
@@ -207,7 +208,8 @@ commit. Its new settings apply once it's merged. The pull request's own table is
 still checked: a mistake in it (an unknown key or a wrong type) makes the run fail
 with a message saying where, so it can't be merged. If the base branch's table has
 a mistake, the run warns and uses the defaults instead of blocking every pull
-request, including the one that fixes it.
+request: pull requests that leave the table alone, and the one that fixes it, are
+still scored.
 
 ## Add it to your GitHub pull requests
 
@@ -222,10 +224,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
-concurrency:
-  group: confidence-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
   pull-requests: write
@@ -233,9 +231,9 @@ permissions:
 
 jobs:
   score:
-    if: >-
-      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
-      || startsWith(github.event.label.name, 'confidence-ack:')
+    concurrency:  # a newer event cancels an older run
+      group: confidence-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -277,10 +275,11 @@ The agent posts a single comment and updates it on each new push. Add
 
 **Acknowledging a deduction.** When a deduction is expected (say a metric grows
 because of a wanted feature), a reviewer can add a label named
-`confidence-ack:<key>`; the report lists the key for each deduction, e.g.
+`confidence-ack:<key>`; each deduction's row in the report shows its key, e.g.
 `confidence-ack:metrics` or `confidence-ack:tests-removed`. Each kind of deduction has
 its own key, so acknowledging a removed test never hides a failing one. The workflow
-reruns when such a label is added or removed. The deduction stays in the report,
+reruns when labels change (any label: a skipped run would show as a passing check).
+A label with an unknown key is ignored, with a note in the report. The deduction stays in the report,
 shown as "0 (−10 acknowledged by @reviewer)", and no longer counts toward the score or
 `--min-score` until the label is removed. Newly failing tests and missing test results
 can't be acknowledged. Labels added by the pull request's own author are ignored
@@ -471,12 +470,12 @@ points if its new code isn't tested.
 - Metric thresholds (2× and +3) ignore units, and a metric that grows because of a
   wanted feature is still flagged. Read metric deductions as "look here", not "this is a bug".
 - `tracemalloc` only sees memory Python allocates; some native libraries' memory isn't counted.
-- **Background work:** a span is credited to the test running when it *started*, and a
-  child span to its parent's test, so work that outlives its test is attributed
-  correctly. Logs, metrics and spans with no parent count for whichever test is
-  running when they happen. That's right for a long-lived worker or test server
-  (its errors belong to the test that triggered them), but a background thread with
-  no trace context that logs after its own test ended is credited to the next test.
+- **Background work:** a span is credited to the test running when it *started*, so a
+  span that outlives its test still counts for that test. Logs and metrics count for
+  the test running when they happen. That's right for a long-lived worker or test
+  server (its errors belong to the test that triggered them), but work a test hands
+  to a background thread that only starts after the test ended is credited to the
+  next test.
 - **Cost:** the test suite runs twice (before and after), under coverage, and memory
   tracking makes it roughly 2–3× slower again. Mutation testing then runs the tests
   that cover each mutated line, up to `max_mutants` (20) times. Use `--no-memory` and

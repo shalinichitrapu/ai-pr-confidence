@@ -61,15 +61,12 @@ def _tag_span(span, parent_context=None) -> None:
     """Credit a span to the test running when it *started*, not when it ended.
 
     A span started by one test in a background thread may finish during the next
-    test. A child span takes its parent's test, so work handed to a thread with
-    the trace context still counts for the test that started it.
+    test. Child spans aren't given their parent's test: a long-lived worker
+    started inside a span would otherwise credit every later test's work to the
+    test that started it.
     """
     try:
-        from opentelemetry import trace
-
-        parent = trace.get_current_span(parent_context).get_span_context()
-        test = _span_tests.get(parent.span_id) if parent.is_valid else None
-        _span_tests[span.get_span_context().span_id] = test or _test_now()
+        _span_tests[span.get_span_context().span_id] = _test_now()
     except Exception:  # pragma: no cover - never break the code under test
         pass
 

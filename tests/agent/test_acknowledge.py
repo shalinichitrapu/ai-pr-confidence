@@ -121,7 +121,27 @@ def test_failing_tests_and_missing_results_cant_be_acknowledged():
     assert score(Signals(tests_total=0), acks={"no-tests": "@lead"}).value == 50
 
 
-def test_report_lists_the_keys_reviewers_can_use():
-    r = score(signals())
-    md = render(r, signals(), "a" * 40, "b" * 40, None)
-    assert "`confidence-ack:metrics`, `confidence-ack:size`" in md
+def test_each_row_shows_its_key_and_unackable_rows_dont():
+    s = Signals(tests_total=5, tests_newly_failing=["a"], tests_failed=["a"], tests_removed=["b"],
+                metrics_enabled=True, metric_regressions={"c": {"test": "t", "kind": "counter", "before": 1, "after": 5}})
+    md = render(score(s), s, "a" * 40, "b" * 40, None)
+    rows = {line.split("|")[3]: line for line in md.splitlines() if line.startswith("| Tests") or line.startswith("| Metrics")}
+    assert any("fail that passed before" in k and "confidence-ack" not in v for k, v in rows.items())
+    assert any("were removed" in k and "confidence-ack:tests-removed" in v for k, v in rows.items())
+    assert any("confidence-ack:metrics" in v for v in rows.values())
+
+
+def test_keys_list_matches_scoring():
+    import inspect
+    import re
+    from confidence_agent import scoring
+    used = set(re.findall(r'add\("([a-z-]+)"', inspect.getsource(scoring.score)))
+    assert used == scoring.KEYS
+
+
+def test_unknown_label_key_gets_a_note(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    monkeypatch.setattr(github, "acknowledgements", lambda repo, pr: ({"tests": "lead"}, "author"))
+    monkeypatch.setattr(github, "post_comment", lambda repo, pr, body: "created")
+    run_cli(repo, tmp_path / "out", "--post-to-pr", "7")
+    assert "Ignored confidence-ack:tests: no deduction has that key" in (tmp_path / "out" / "report.md").read_text()
