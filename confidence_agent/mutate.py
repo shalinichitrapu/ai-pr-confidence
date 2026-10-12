@@ -67,7 +67,9 @@ def telemetry_lines(source: str) -> set:
             continue
         method, receiver = node.value.func.attr, ast.unparse(node.value.func.value)
         last = receiver.rsplit(".", 1)[-1].lower().lstrip("_")
-        logger_like = last in ("log", "logger", "logging") or last.endswith("logger")
+        # log, logger, app_log, audit_log, LOGGER, logging, logging.getLogger(__name__)
+        logger_like = (last in ("log", "logging") or last.endswith(("_log", "logger"))
+                       or last.startswith("getlogger("))
         if ((method in LOG_CALLS and logger_like) or method in SPAN_CALLS
                 or (method in INSTRUMENT_CALLS and receiver in instruments)):
             lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
@@ -222,13 +224,16 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
     env.pop("PYTEST_ADDOPTS", None)
     started = time.monotonic()
     for i, mutant in enumerate(chosen):
-        if i and time.monotonic() - started > total_budget:  # always try at least one
+        left = total_budget - (time.monotonic() - started)
+        if i and left <= 0:  # always try at least one
             result.note = (f"stopped after {i} of {len(chosen)} mutants: the {total_budget:g}s mutation "
                            "budget ran out (mutation_budget_s)")
             break
         file = workdir / mutant.path
         tests = _test_ids(contexts[mutant.path][str(mutant.line)], failing)
         budget = max(timeout, 5 * sum(durations.get(t, 0.0) for t in tests) + 10)
+        if i:
+            budget = min(budget, left)  # the overall budget is a hard limit after the first mutant
         with tempfile.TemporaryDirectory(prefix="confidence-pyc-") as pyc:
             # A fresh bytecode cache: same-size edits made within one second could
             # otherwise reuse the cached, unmutated bytecode.
@@ -245,6 +250,7 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
             result.killed += 1
         else:
             result.survived.append(mutant.describe())
-    if result.tried and result.skipped == result.tried and not result.note:
-        result.note = f"none of the {result.tried} mutants could be tested (the covering tests didn't run cleanly)"
+    if result.tried and result.skipped == result.tried:
+        none = f"none of the {result.tried} mutants could be tested (the covering tests didn't run cleanly)"
+        result.note = f"{result.note}; {none}" if result.note else none
     return result
