@@ -136,7 +136,9 @@ and reused by later runs against the same commit, keyed by the commit, `--source
 `--tests`, memory tracking, the Python version, installed packages and the agent's
 own version. Anything different means a fresh run. `--cache-dir` moves it and
 `--no-cache` turns it off. Only base runs where every test passed are saved, so a
-one-off failure can't excuse that test failing later. With cached base results,
+one-off failure can't excuse that test failing later. An error *log* from a one-off
+problem in a cached base run is still treated as normal for that base, so the same
+error in a later pull request isn't flagged; `--no-cache` avoids that if you suspect it. With cached base results,
 latency isn't compared, because the timings may come from another machine (in CI,
 an earlier job's runner); the report says so.
 
