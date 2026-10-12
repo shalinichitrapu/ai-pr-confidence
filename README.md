@@ -40,7 +40,7 @@ automatic first check worth having. It doesn't replace code review.
 | Signal | Deduction | Why it matters |
 |---|---|---|
 | Tests that newly fail | −45 first, −5 each more (max −55), so the score is always Low | The change broke behavior |
-| Tests that newly fail, then pass when rerun once | −5 (flaky, or made flaky by this change) | One flaky test shouldn't sink an unrelated change |
+| Tests that newly fail, then pass when the same tests run again in the same order | −5 (flaky, or made flaky by this change) | One flaky test shouldn't sink an unrelated change; rerunning in the same order keeps order-dependent bugs counted as failures |
 | No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
 | Tests removed | −15 (a test whose file was renamed, keeping its name, counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |

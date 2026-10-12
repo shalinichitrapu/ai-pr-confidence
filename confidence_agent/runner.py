@@ -77,23 +77,14 @@ def _import_paths(workdir: Path) -> List[str]:
     return paths
 
 
-def _node_id(workdir: Path, test_id: str) -> str:
-    """JUnit's "tests.test_a.TestX::test_f" -> pytest's "tests/test_a.py::TestX::test_f".
+def rerun_tests(workdir: Path, test_ids: List[str], tests_path: str) -> Dict[str, str]:
+    """Run the same tests again, in the same order, and return the outcomes of test_ids.
 
-    The class name is a dotted path; the longest prefix that is a .py file in the
-    checkout is the module, and the rest are classes.
+    The whole set runs again, not just the failing tests: a failure that depends
+    on test order or on state another test leaves behind passes when the test
+    runs alone, and must not be mistaken for flakiness. It runs plainly (no
+    coverage or telemetry), and only when something newly failed.
     """
-    classname, _, name = test_id.rpartition("::")
-    parts = classname.split(".")
-    for i in range(len(parts), 0, -1):
-        path = "/".join(parts[:i]) + ".py"
-        if (workdir / path).is_file():
-            return "::".join([path, *parts[i:], name])
-    return test_id
-
-
-def rerun_tests(workdir: Path, test_ids: List[str]) -> Dict[str, str]:
-    """Run some tests once more, plainly (no coverage or telemetry), and return their outcomes."""
     if not test_ids:
         return {}
     scratch = Path(tempfile.mkdtemp(prefix="confidence-rerun-"))
@@ -101,7 +92,7 @@ def rerun_tests(workdir: Path, test_ids: List[str]) -> Dict[str, str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(p for p in (*_import_paths(workdir), env.get("PYTHONPATH", "")) if p)
     env.pop("PYTEST_ADDOPTS", None)
-    cmd = [sys.executable, "-m", "pytest", *[_node_id(workdir, t) for t in test_ids], "-q",
+    cmd = [sys.executable, "-m", "pytest", tests_path, "-q",
            f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider"]
     if importlib.util.find_spec("xdist") is not None:
         cmd += ["-n", "0"]
