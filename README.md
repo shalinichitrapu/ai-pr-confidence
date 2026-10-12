@@ -439,11 +439,43 @@ roughly tens of seconds per summary. A recent Mac or a GPU is much faster.
 ```
 confidence-agent [--repo .] [--base main] [--head HEAD]
                  [--source PKG] [--tests tests] [--out confidence-report]
-                 [--no-memory] [--no-llm] [--llm-url URL] [--llm-model NAME]
-                 [--post-to-pr N] [--min-score N]
+                 [--no-memory] [--no-mutation] [--cache-dir DIR] [--no-cache]
+                 [--no-llm] [--llm-url URL] [--llm-model NAME]
+                 [--post-to-pr N] [--ack KEYS] [--min-score N]
+
+confidence-calibrate [--repo .] [--branch main] [--limit 20] [--outcomes CSV]
+                     [--source PKG] [--tests tests] [--full] [--out confidence-calibration]
 ```
 
 `--min-score 60` makes the command exit non-zero below 60, so it can gate merges.
+It exits 2 if the change's own `[tool.confidence]` table has a mistake.
+
+## Checking the score against outcomes
+
+`confidence-calibrate` scores a project's recent changes and compares the scores
+with what happened to them:
+
+```bash
+confidence-calibrate --repo . --branch main --limit 30 --source my_package
+```
+
+It scores each commit on the branch's first-parent line (a merge commit covers
+everything it merged; a direct or squashed commit covers itself) and marks the ones
+that were later reverted, using git's own "This reverts commit …" messages. A revert
+made inside a pull request before it merged doesn't count. For outcomes git can't see, such as incidents or
+hotfixes, pass `--outcomes outcomes.csv` with `sha,bad` or `sha,good` rows.
+
+`confidence-calibration/calibration.md` shows:
+- **Revert rate by band:** a useful score has a higher rate in Low than in High.
+- **Lift per deduction:** how much more often changes with that deduction went bad,
+  grouped by deduction key (the keys shown in reports). Each key maps to a weight in
+  `[tool.confidence.weights]`, e.g. `tests-removed` → `tests_removed`, `logs` →
+  `error_logs`, `traces` → `span_exceptions`; `logs-new-tests` and `traces-new-tests`
+  use half of `error_logs` and `span_exceptions`. This is the evidence for tuning
+  those weights.
+
+Memory tracking and mutation testing are off by default here, for speed; `--full`
+turns them on. With only a few bad outcomes, the numbers are a direction, not a fit.
 
 ## Developing the agent
 
@@ -466,10 +498,10 @@ points if its new code isn't tested.
 - Telemetry comes from test runs, so it only sees code paths tests exercise.
   Next: replay recorded production traffic, or score canary deployments with the same signals.
 - **Weights and thresholds were picked by hand** while building the demo, and
-  haven't been checked against real codebases yet. They're constants at the top of
-  `confidence_agent/signals.py` and `confidence_agent/scoring.py`. Next: score real
-  past PRs (merged cleanly vs. reverted or caused incidents) and fit the weights to
-  those outcomes.
+  haven't been checked against real codebases yet. The defaults live in
+  `confidence_agent/config.py` and can be changed per project in
+  `[tool.confidence]`. `confidence-calibrate` shows how the score lines up with real
+  outcomes; fitting weights from that is still manual.
 - Latency comparison uses medians from a single run; repeated runs would cut noise.
 - Metric thresholds (2× and +3) ignore units, and a metric that grows because of a
   wanted feature is still flagged. Read metric deductions as "look here", not "this is a bug".

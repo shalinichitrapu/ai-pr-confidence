@@ -168,7 +168,8 @@ def main(argv=None) -> int:
     (out / "result.json").write_text(
         json.dumps(
             {"score": result.value, "band": result.band,
-             "deductions": [{"signal": s, "points": p, "reason": r} for s, p, r in result.deductions],
+             "deductions": [{"signal": s, "key": k, "points": p, "reason": r}
+                            for (s, p, r), k in zip(result.deductions, result.keys)],
              "acknowledged": [{"signal": s, "points": p, "reason": r, "by": w} for s, p, r, w in result.acknowledged],
              "passed_checks": result.passed_checks, "signals": sig.to_dict(), "summary": summary,
              "base": base_sha, "head": head_sha},
