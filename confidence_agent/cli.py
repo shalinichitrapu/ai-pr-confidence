@@ -57,13 +57,16 @@ def main(argv=None) -> int:
         # Don't block every pull request (including the one fixing it) on a broken base.
         cfg = config.Config()
         config_warnings.append(f"[tool.confidence] on {args.base} has a mistake, so defaults were used: {exc}")
+    head_toml = gitutil.read_file(repo, head_sha, "pyproject.toml") or ""
     try:
-        config.parse(gitutil.read_file(repo, head_sha, "pyproject.toml") or "")
+        config.parse(head_toml)
     except config.ConfigError as exc:
-        config_broken = True
-        config_warnings.append(f"This change's [tool.confidence] has a mistake; fix it before merging: {exc}")
-    for warning in config_warnings:
-        print(f"[confidence] WARNING: {warning}")
+        # Only this change's own mistake fails the run; one it inherited
+        # unchanged from the base would otherwise block every pull request.
+        start_toml = gitutil.read_file(repo, base_sha, "pyproject.toml") or ""
+        if config.raw_table(head_toml) != config.raw_table(start_toml):
+            config_broken = True
+            config_warnings.append(f"This change's [tool.confidence] has a mistake; fix it before merging: {exc}")
     args.source = args.source or cfg.source or "."
     args.tests = args.tests or cfg.tests or "tests"
     args.min_score = args.min_score if args.min_score is not None else (cfg.min_score or 0)
