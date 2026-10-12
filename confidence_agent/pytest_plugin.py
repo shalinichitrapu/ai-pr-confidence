@@ -20,6 +20,15 @@ import tracemalloc
 from typing import Any, Dict, List, Optional
 
 _current_test: Optional[str] = None
+_span_tests: Dict[int, Optional[str]] = {}  # span id -> test running when the span started
+
+
+def _test_now() -> Optional[str]:
+    # The test running right now. Deliberately not a context variable: a
+    # long-lived asyncio task (a server or queue worker started by a shared
+    # fixture) would carry the first test's value forever and get every later
+    # test's errors credited to it.
+    return _current_test
 _logs: List[Dict[str, Any]] = []
 _exporter = None
 _metric_reader = None
@@ -43,9 +52,23 @@ class _CaptureHandler(logging.Handler):
                 "message": record.getMessage(),
                 "exc_type": exc_type,
                 "location": f"{record.pathname.rsplit(os.sep, 1)[-1]}:{record.funcName}",
-                "test": _current_test,
+                "test": _test_now(),
             }
         )
+
+
+def _tag_span(span, parent_context=None) -> None:
+    """Credit a span to the test running when it *started*, not when it ended.
+
+    A span started by one test in a background thread may finish during the next
+    test. Child spans aren't given their parent's test: a long-lived worker
+    started inside a span would otherwise credit every later test's work to the
+    test that started it.
+    """
+    try:
+        _span_tests[span.get_span_context().span_id] = _test_now()
+    except Exception:  # pragma: no cover - never break the code under test
+        pass
 
 
 def pytest_configure(config):  # noqa: D401 - pytest hook
@@ -66,6 +89,13 @@ def pytest_configure(config):  # noqa: D401 - pytest hook
         return
     _exporter = InMemorySpanExporter()
     provider = TracerProvider()
+    from opentelemetry.sdk.trace import SpanProcessor
+
+    class _TestTagger(SpanProcessor):
+        def on_start(self, span, parent_context=None):
+            _tag_span(span, parent_context)
+
+    provider.add_span_processor(_TestTagger())
     provider.add_span_processor(SimpleSpanProcessor(_exporter))
     trace.set_tracer_provider(provider)
 
@@ -135,13 +165,7 @@ def pytest_runtest_teardown(item):
     _coverage_context("")
 
 
-_span_tests: Dict[int, Optional[str]] = {}
-
-
 def pytest_runtest_call(item):
-    # Remember how many spans existed before this test so we can attribute
-    # new spans to it afterwards.
-    item._confidence_span_start = len(_exporter.get_finished_spans()) if _exporter else 0
     _collect_metrics(None)  # drop anything recorded during setup
     if _track_memory:
         if not tracemalloc.is_tracing():
@@ -157,11 +181,6 @@ def pytest_runtest_makereport(item, call):
     _collect_metrics(item.nodeid)
     if _track_memory and tracemalloc.is_tracing() and hasattr(item, "_confidence_mem_start"):
         _memory[item.nodeid] = max(0, tracemalloc.get_traced_memory()[1] - item._confidence_mem_start)
-    if _exporter is None:
-        return
-    spans = _exporter.get_finished_spans()
-    for span in spans[getattr(item, "_confidence_span_start", 0):]:
-        _span_tests.setdefault(id(span), item.nodeid)
 
 
 def _span_to_dict(span) -> Dict[str, Any]:
@@ -181,7 +200,7 @@ def _span_to_dict(span) -> Dict[str, Any]:
         "duration_ms": (span.end_time - span.start_time) / 1e6,
         "status": getattr(status, "name", str(status)),
         "events": events,
-        "test": _span_tests.get(id(span)),
+        "test": _span_tests.get(span.context.span_id),
     }
 
 

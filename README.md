@@ -433,6 +433,12 @@ points if its new code isn't tested.
 - Metric thresholds (2× and +3) ignore units, and a metric that grows because of a
   wanted feature is still flagged. Read metric deductions as "look here", not "this is a bug".
 - `tracemalloc` only sees memory Python allocates; some native libraries' memory isn't counted.
+- **Background work:** a span is credited to the test running when it *started*, so a
+  span that outlives its test still counts for that test. Logs and metrics count for
+  the test running when they happen. That's right for a long-lived worker or test
+  server (its errors belong to the test that triggered them), but work a test hands
+  to a background thread that only starts after the test ended is credited to the
+  next test.
 - **Cost:** the test suite runs twice (before and after), under coverage, and memory
   tracking makes it roughly 2–3× slower again. Mutation testing then runs the tests
   that cover each mutated line, up to `max_mutants` (20) times. Use `--no-memory` and
