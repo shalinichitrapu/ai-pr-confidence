@@ -77,10 +77,14 @@ def test_signal_and_score():
 
 def test_in_tests_only_silenced_assertion_failures_are_reported():
     from confidence_agent.signals import compute
-    diff = Diff(added_lines={"tests/test_pay.py": {4}}, head_source={"tests/test_pay.py": SOURCE})
+    checks = "def test_a():\n    try:\n        assert pay() == 1\n    except Exception:\n        pass\n"
+    diff = Diff(added_lines={"tests/test_pay.py": {4}}, head_source={"tests/test_pay.py": checks})
     found = compute(RunResult("b"), RunResult("h"), diff, "tests").hidden_code
-    # `except Exception: pass` in a test also swallows AssertionError.
+    # `except Exception: pass` around an assertion also swallows AssertionError.
     assert list(found) == ["test failures silenced"]
+    # Around cleanup code that checks nothing, it isn't hiding a failure.
+    diff = Diff(added_lines={"tests/test_pay.py": {4}}, head_source={"tests/test_pay.py": SOURCE})
+    assert compute(RunResult("b"), RunResult("h"), diff, "tests").hidden_code == {}
 
 
 def git(repo, *args):

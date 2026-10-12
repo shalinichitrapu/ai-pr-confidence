@@ -33,7 +33,8 @@ def test_narrow_handler_counts_when_the_change_also_dropped_error_handling():
     after = "def price(sku):\n    try:\n        return CATALOG[sku]\n    except KeyError:\n        return 0.0\n"
     # The same new narrow handler: harmless on its own, flagged when the change removed a raise.
     assert hidden(added_lines={"app/p.py": {4, 5}}, head_source={"app/p.py": after}) == {}
-    found = hidden(added_lines={"app/p.py": {4, 5}}, head_source={"app/p.py": after},
+    before = "def price(sku):\n    try:\n        return CATALOG[sku]\n    except KeyError:\n        raise UnknownSku(sku)\n"
+    found = hidden(added_lines={"app/p.py": {5}}, head_source={"app/p.py": after}, base_source={"app/p.py": before},
                    removed_text={"app/p.py": ["        raise UnknownSku(sku)"]}, removed_lines={"app/p.py": {5}})
     assert "errors silenced without a trace" in found
 
@@ -136,3 +137,91 @@ def test_mentioning_the_error_in_a_debug_log_isnt_handling_it():
     src = ("def total(lines):\n    try:\n        return price(lines)\n    except Exception as exc:\n"
            "        logger.debug('could not price order: %s', exc)\n        return 0.0\n")
     assert silent_excepts(src, [4, 5, 6]) == [4]
+
+
+# --- second review round ---------------------------------------------------------
+
+def test_a_rewritten_signature_doesnt_launder_removed_logging():
+    before = ("def pay(amount):\n    try:\n        return charge(amount)\n    except Exception:\n"
+              "        log.error('charge failed')\n        raise\n")
+    after = "def pay(amount: int):\n    return charge(amount)\n"
+    found = hidden(added_lines={"app/m.py": {1, 2}}, head_source={"app/m.py": after}, base_source={"app/m.py": before},
+                   removed_text={"app/m.py": before.splitlines()}, removed_lines={"app/m.py": set(range(1, 7))})
+    assert "error logging removed" in found
+
+
+def test_reflowed_or_equivalent_assertions_arent_weakened():
+    before = ["    assert a == b and c == d", "    self.assertEqual(x, {'k': 1})", "    self.assertRaises(ValueError, f)"]
+    after = ("def test_x(self):\n    assert (\n        a == b\n        and c == d\n    )\n"
+             "    self.assertDictEqual(x, {'k': 1})\n    with pytest.raises(ValueError):\n        f()\n")
+    added = after.splitlines()
+    found = hidden(added_lines={"tests/test_a.py": set(range(1, 9))}, head_source={"tests/test_a.py": after},
+                   added_text={"tests/test_a.py": added}, removed_text={"tests/test_a.py": before})
+    assert "test assertions weakened" not in found
+
+
+def test_a_narrow_handler_elsewhere_in_the_file_isnt_tied_to_a_removed_raise():
+    before = "def check(x):\n    raise ValueError(x)\n\ndef get(d, k):\n    return d[k]\n"
+    after = ("def check(x):\n    return None\n\ndef get(d, k):\n    try:\n        return d[k]\n"
+             "    except KeyError:\n        return None\n")
+    found = hidden(added_lines={"pkg/m.py": {2, 5, 6, 7, 8}}, head_source={"pkg/m.py": after},
+                   base_source={"pkg/m.py": before}, removed_text={"pkg/m.py": ["    raise ValueError(x)", "    return d[k]"]},
+                   removed_lines={"pkg/m.py": {2, 5}})
+    assert "errors silenced without a trace" not in found
+
+
+def test_editing_an_already_silent_handler_isnt_new():
+    before = "def f():\n    try:\n        return go()\n    except Exception:\n        return None\n"
+    after = "def f():\n    try:\n        return go()\n    except Exception:\n        return {}\n"
+    from confidence_agent.swallow import removed_silent_handlers
+    removed = removed_silent_handlers({"a.py": before}, {"a.py": {5}})
+    assert new_silent_excepts("a.py", after, [5], removed) == []
+
+
+def test_conftest_fixtures_and_benign_pytest_settings_arent_collection_tricks(tmp_path):
+    git(tmp_path, "init", "-q")
+    (tmp_path / "pyproject.toml").write_text('[tool.pytest.ini_options]\ntestpaths = ["tests"]\n')
+    (tmp_path / "conftest.py").write_text("")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-qm", "base")
+    (tmp_path / "pyproject.toml").write_text('[tool.pytest.ini_options]\ntestpaths = ["tests"]\n'
+                                             'markers = ["slow"]\nfilterwarnings = ["error"]\n')
+    (tmp_path / "conftest.py").write_text(
+        "import shutil, pytest\n\n@pytest.fixture\ndef docker():\n"
+        "    if not shutil.which('docker'):\n        pytest.skip('needs docker')\n"
+        "\nslow = pytest.mark.skipif(True, reason='x')\n")
+    git(tmp_path, "commit", "-qam", "head")
+    d = read_diff(tmp_path, "HEAD~1", "HEAD")
+    assert d.pytest_config_changes == []
+    assert compute(RunResult("b"), RunResult("h"), d, "tests").hidden_code == {}
+
+
+def test_odd_pyproject_shapes_dont_crash():
+    from confidence_agent.review_scope import pytest_settings
+    assert pytest_settings("pyproject.toml", "tool = 3\n") == {}
+    assert dependency_changes("pyproject.toml", "tool = 3\nproject = 1\n", "[tool]\npoetry = 2\n") == []
+    assert pytest_settings("pyproject.toml", '[tool.pytest]\naddopts = "-k fast"\n') == {"addopts": "'-k fast'"}
+
+
+def test_secret_names_with_a_suffix_are_still_secrets():
+    src = 'db_password_prod = "s3cr3tPassw0rd"\napi_key_live = "abcd1234efgh5678"\n'
+    found = [f.split(": ", 1)[1] for f in risky_code("a.py", src, [1, 2])]
+    assert found == ["hard-coded secret in db_password_prod", "hard-coded secret in api_key_live"]
+
+
+def test_import_module_then_attribute_is_resolved():
+    src = "import importlib\nimportlib.import_module('pickle').loads(blob)\n"
+    assert [f.split(": ", 1)[1] for f in risky_code("a.py", src, [2])] == [
+        "pickle.loads() can run code from untrusted data"]
+
+
+def test_debug_level_log_call_isnt_a_trace_and_multiline_suppress_is_seen():
+    src = ("import logging\nfrom contextlib import suppress\n\ndef f():\n    try:\n        go()\n"
+           "    except Exception:\n        log.log(logging.DEBUG, 'ignored')\n\ndef g():\n    with (\n"
+           "        suppress(Exception),\n    ):\n        go()\n")
+    assert silent_excepts(src, [8, 12]) == [7, 12]
+
+
+def test_any_spelling_of_the_coverage_pragma_is_flagged():
+    found = hidden(added_lines={"app/m.py": {1}}, added_text={"app/m.py": ["def danger(x):  # pragma nocover"]})
+    assert "coverage exclusions added" in found

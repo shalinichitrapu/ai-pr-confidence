@@ -14,7 +14,7 @@ from .config import Config
 from .expectations import expected_exceptions, node_file
 from .gitutil import Diff
 from .review_scope import config_only, risky_code, unmeasured
-from .swallow import new_silent_excepts, removed_silent_handlers
+from .swallow import new_silent_excepts, removed_silent_handlers, scopes
 from .runner import RunResult, junit_id
 
 # Thresholds (how much slower, how much a metric or memory must grow) come from
@@ -90,7 +90,8 @@ class Signals:
 # Changes that hide code from the agent rather than fix it. Each pattern is
 # counted net (removed minus added, or added minus removed for pragmas) across
 # the whole diff, so code that merely moved between files is not flagged.
-PRAGMA = re.compile(r"#\s*pragma:\s*no\s*cover", re.IGNORECASE)
+# The same spellings coverage's default exclusion accepts (`# pragma nocover` too).
+PRAGMA = re.compile(r"#\s*pragma[:\s]?\s*no\s*cover", re.IGNORECASE)
 ERROR_LOG_CALL = re.compile(r"(?:\b|_)log\w*\.(error|exception|critical)\(|getLogger\([^)]*\)\.(error|exception|critical)\(",
                             re.IGNORECASE)
 HIDING_PATTERNS = {
@@ -101,11 +102,18 @@ HIDING_PATTERNS = {
     "metric instruments removed": (re.compile(r"\bcreate_(counter|up_down_counter|histogram|gauge)\("), "removed", "code"),
     # An assertion that compared values, replaced by a weaker one or none.
     # (`is None` / `is not None` checks don't pin a value, so they don't count as comparisons.)
-    "test assertions weakened": (re.compile(r"^\s*(assert\b.*(==|!=|<=|>=|<|>|\bin\b)|self\.assert(Equal|In|Raises|Less|Greater|AlmostEqual))"),
+    "test assertions weakened": (re.compile(r"^\s*(assert\b.*(==|!=|<=|>=|<|>|\bin\b)"
+                                            r"|self\.assert(?!(True|False|IsNone|IsNotNone|Is|IsNot)\()\w+\("
+                                            r"|(with\s+)?pytest\.(raises|approx)\()"),
                                  "removed", "tests"),
 }
-COLLECTION_TRICKS = re.compile(r"collect_ignore|pytest_collection_modifyitems|pytest\.skip\(|pytest\.mark\.(skip|xfail)"
-                               r"|deselect|pytest_ignore_collect")
+COLLECTION_TRICKS = re.compile(r"\bcollect_ignore|pytest_collection_modifyitems|pytest_ignore_collect|--deselect\b"
+                               r"|pytest\.skip\(.*allow_module_level|pytest\.mark\.(skip|xfail)\b|\bdeselect\(")
+
+
+def _squash(text: str) -> str:
+    """Code without whitespace or brackets, so a reflowed statement still matches."""
+    return re.sub(r"[\s()]", "", text)
 
 
 def _deleted_definition_lines(diff: Diff) -> Dict[str, set]:
@@ -126,13 +134,29 @@ def _deleted_definition_lines(diff: Diff) -> Dict[str, set]:
             tree = ast.parse(source)
         except SyntaxError:
             continue
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                first = min([node.lineno] + [d.lineno for d in node.decorator_list])
-                span = set(range(first, (node.end_lineno or node.lineno) + 1))
-                if span <= removed:
-                    out.setdefault(path, set()).update(span)
+        head_path = next((new for new, old in diff.renamed.items() if old == path), path)
+        still_there = _definitions(diff.head_source.get(head_path, ""))
+        for name, node in _definitions(source).items():
+            # A def whose lines all changed but whose name is still there was
+            # rewritten (a new signature), not deleted.
+            if name in still_there:
+                continue
+            first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+            span = set(range(first, (node.end_lineno or node.lineno) + 1))
+            if span <= removed:
+                out.setdefault(path, set()).update(span)
     return out
+
+
+def _definitions(source: str) -> Dict[str, ast.AST]:
+    """Functions and classes by qualified name ("Cart.total")."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    where = scopes(tree)
+    return {(f"{where[id(n)][0]}.{n.name}" if where[id(n)][0] else n.name): n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
 
 
 def _removed_with_numbers(diff: Diff, path: str):
@@ -158,23 +182,54 @@ def _hidden_code(diff: Diff, tests_path: str) -> Dict[str, List[str]]:
                 gone = deleted.get(path, set())
                 hits["removed"] += [f"{path}: {text.strip()}" for n, text in _removed_with_numbers(diff, path)
                                     if pattern.search(text) and n not in gone]
+        if kind == "test assertions weakened":
+            # A removed assertion still in the file, reflowed (black) or reworded, wasn't removed.
+            head = {p: _squash(t) for p, t in diff.head_source.items()}
+            hits["removed"] = [h for h in hits["removed"]
+                               if _squash(h.split(": ", 1)[1]) not in head.get(h.split(": ", 1)[0], "")]
         other = "removed" if direction == "added" else "added"
         net = len(hits[direction]) - len(hits[other])
         if net > 0:
             found[kind] = hits[direction][:net]
-    tricks = [f"{path}: {line.strip()}" for path, lines in diff.added_text.items()
-              if path.rsplit("/", 1)[-1] == "conftest.py" for line in lines if COLLECTION_TRICKS.search(line)]
+
+    def conftest_tricks(texts):
+        return [(path, line.strip()) for path, lines in texts.items()
+                if path.rsplit("/", 1)[-1] == "conftest.py" for line in lines if COLLECTION_TRICKS.search(line)]
+    was_there = Counter(line for _, line in conftest_tricks(diff.removed_text))  # moved or renamed conftest
+    tricks = []
+    for path, line in conftest_tricks(diff.added_text):
+        if was_there[line] > 0:
+            was_there[line] -= 1
+        else:
+            tricks.append(f"{path}: {line}")
     tricks += [f"pytest settings changed in {c}" for c in diff.pytest_config_changes]
     if tricks:
         found["test collection or configuration changed"] = tricks
     return found
 
 
-def _drops_error_handling(diff: Diff, path: str) -> bool:
-    """Did this change remove more `raise` / error-logging lines than it added in this file?"""
-    def count(lines):
-        return sum(1 for line in lines if re.match(r"\s*raise\b", line) or ERROR_LOG_CALL.search(line))
-    return count(diff.removed_text.get(path, [])) > count(diff.added_text.get(path, []))
+def _drops_error_handling(diff: Diff, path: str) -> set:
+    """Functions in this file where the change removed more `raise` / error-log lines than it added."""
+    def handling(line):
+        return re.match(r"\s*raise\b", line) or ERROR_LOG_CALL.search(line)
+
+    def scope_of(source, numbers):
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return Counter()
+        where, found = scopes(tree), Counter()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.stmt) and node.lineno in numbers:
+                found[where.get(id(node), ("", None))[0]] += 1
+        return found
+    base_path = diff.renamed.get(path, path)
+    removed_at = {n for n, text in _removed_with_numbers(diff, base_path) if n is not None and handling(text)}
+    head_lines = diff.head_source.get(path, "").split("\n")
+    added_at = {n for n in diff.added_lines.get(path, ()) if n <= len(head_lines) and handling(head_lines[n - 1])}
+    gone = scope_of(diff.base_source.get(base_path, ""), removed_at)
+    gone.subtract(scope_of(diff.head_source.get(path, ""), added_at))
+    return {scope for scope, n in gone.items() if n > 0}
 
 
 def _module(path: str) -> str:
@@ -430,14 +485,16 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     s.hidden_code = _hidden_code(diff, tests_path)
     removed = removed_silent_handlers(diff.base_source, diff.removed_lines,
                                       skip=lambda path: _is_test_file(path, tests_path))
+    removed_in_tests = removed_silent_handlers(diff.base_source, diff.removed_lines,
+                                               skip=lambda path: not _is_test_file(path, tests_path), in_test=True)
     silenced, in_tests = [], []
     for path, text in sorted(diff.head_source.items()):
         changed = diff.added_lines.get(path, ())
         if _is_test_file(path, tests_path):
-            in_tests += new_silent_excepts(path, text, changed, Counter(), in_test=True)
+            in_tests += new_silent_excepts(path, text, changed, removed_in_tests, in_test=True)
         else:
             silenced += new_silent_excepts(path, text, changed, removed,
-                                           narrow_too=_drops_error_handling(diff, path))
+                                           narrow_in=_drops_error_handling(diff, path))
     if silenced:
         s.hidden_code["errors silenced without a trace"] = silenced
     if in_tests:

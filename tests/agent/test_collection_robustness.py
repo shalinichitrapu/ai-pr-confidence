@@ -205,3 +205,38 @@ def test_temp_folders_are_cleaned_up(tmp_path, monkeypatch):
     cli.main(["--repo", str(repo), "--base", "main", "--head", "change", "--source", "pkg", "--no-llm",
               "--no-memory", "--no-mutation", "--no-cache", "--out", str(tmp_path / "out")])
     assert list(scratch.iterdir()) == []
+
+
+def test_log_capture_doesnt_change_records_and_respects_logger_filters(tmp_path):
+    p = project(tmp_path / "p", {
+        "pkg/__init__.py": ("import logging\n\ndef f():\n    noisy = logging.getLogger('noisy')\n"
+                            "    noisy.addFilter(lambda r: False)\n    noisy.error('dropped')\n"
+                            "    logging.getLogger('app').error('kept', extra={'user': 'u'})\n    return 1\n"),
+        "tests/test_f.py": ("import logging\nfrom pkg import f\n\nSTD = set(vars(logging.makeLogRecord({})))\n\n"
+                            "def test_f(caplog):\n    assert f() == 1\n"
+                            "    assert set(vars(caplog.records[-1])) - STD - {'message', 'asctime'} == {'user'}\n"),
+    })
+    r = run_tests(p, "head", "pkg", "tests", track_memory=False)
+    assert r.tests == {"tests.test_f::test_f": "passed"}, r.output_tail
+    assert [x["message"] for x in r.logs if x["level"] == "ERROR"] == ["kept"]
+
+
+def test_shared_fixture_teardown_isnt_credited_to_the_last_test(tmp_path):
+    p = project(tmp_path / "p", {"tests/test_f.py": (
+        "import logging, pytest\n\n@pytest.fixture(scope='module')\ndef db():\n    yield\n"
+        "    logging.getLogger('app').error('module teardown')\n\n"
+        "def test_one(db):\n    pass\n\ndef test_two(db):\n    pass\n")})
+    r = run_tests(p, "head", "pkg", "tests", track_memory=False)
+    assert [x["test"] for x in r.logs if x["message"] == "module teardown"] == [None]
+
+
+def test_quoted_non_ascii_file_names():
+    from confidence_agent.gitutil import _unquote
+    assert _unquote('"\\303\\251\\t.py"') == "é\t.py"
+    assert _unquote('"é\\"日.py"') == 'é"日.py'
+
+
+def test_a_crash_exits_3_not_1(monkeypatch, tmp_path):
+    repo = two_commits(tmp_path, {}, {"pkg/b.py": "y = 2\n"})
+    monkeypatch.setattr(cli.gitutil, "read_diff", lambda *a: 1 / 0)
+    assert cli.main(["--repo", str(repo), "--base", "main", "--head", "change", "--no-llm"]) == cli.COULDNT_RUN

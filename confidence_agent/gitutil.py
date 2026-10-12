@@ -33,10 +33,24 @@ def _decode_source(data: bytes, path: str) -> str:
 
 def _unquote(path: str) -> str:
     """Undo git's C-style quoting of unusual file names ("we\"ird.py")."""
-    if len(path) >= 2 and path[0] == path[-1] == '"':
-        raw = path[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape")
-        return raw.encode("latin-1", "replace").decode("utf-8", "replace")
-    return path
+    if not (len(path) >= 2 and path[0] == path[-1] == '"'):
+        return path
+    simple = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+    out, text, i = bytearray(), path[1:-1], 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            if text[i + 1] in simple:
+                out.append(simple[text[i + 1]])
+                i += 2
+                continue
+            if text[i + 1:i + 4].isdigit():  # \303\251: the UTF-8 bytes of a non-ASCII name
+                out.append(int(text[i + 1:i + 4], 8))
+                i += 4
+                continue
+        out += c.encode("utf-8")  # with core.quotePath=false, non-ASCII arrives as-is
+        i += 1
+    return out.decode("utf-8", "replace")
 
 
 def resolve(repo: Path, ref: str) -> str:

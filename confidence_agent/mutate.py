@@ -270,49 +270,53 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
     scratch = tempfile.mkdtemp(prefix="confidence-mutate-")
     env["CONFIDENCE_SCRATCH"] = scratch
     clean: Dict[Tuple[str, ...], bool] = {}  # covering test set -> passes without any mutant
-    started = time.monotonic()
-    for i, mutant in enumerate(chosen):
-        left = total_budget - (time.monotonic() - started)
-        if i and left <= 0:  # always try at least one
-            result.note = (f"stopped after {i} of {len(chosen)} mutants: the {total_budget:g}s mutation "
-                           "budget ran out (mutation_budget_s)")
-            break
-        file = workdir / mutant.path
-        tests = _test_ids(contexts[mutant.path][str(mutant.line)], failing)
-        normal = max(timeout, 5 * sum(durations.get(t, 0.0) for t in tests) + 10)
-        budget = min(normal, left) if i else normal  # the overall budget is a hard limit after the first
-        key = tuple(tests)
-        if key not in clean:
-            # These tests passed in the full run, but may depend on another test
-            # having run first. Run them alone, unmutated, once: if they fail
-            # here, they'd "catch" every mutant for the wrong reason.
+    try:
+        started = time.monotonic()
+        for i, mutant in enumerate(chosen):
+            left = total_budget - (time.monotonic() - started)
+            if i and left <= 0:  # always try at least one
+                result.note = (f"stopped after {i} of {len(chosen)} mutants: the {total_budget:g}s mutation "
+                               "budget ran out (mutation_budget_s)")
+                break
+            file = workdir / mutant.path
+            tests = _test_ids(contexts[mutant.path][str(mutant.line)], failing)
+            normal = max(timeout, 5 * sum(durations.get(t, 0.0) for t in tests) + 10)
+            budget = min(normal, left) if i else normal  # the overall budget is a hard limit after the first
+            key = tuple(tests)
+            if key not in clean:
+                # These tests passed in the full run, but may depend on another test
+                # having run first. Run them alone, unmutated, once: if they fail
+                # here, they'd "catch" every mutant for the wrong reason.
+                with tempfile.TemporaryDirectory(prefix="confidence-pyc-") as pyc:
+                    env["PYTHONPYCACHEPREFIX"] = pyc
+                    clean[key] = _run(workdir, tests, env, budget) is False
+                if i:  # the pre-check spent some of the overall budget
+                    budget = min(normal, total_budget - (time.monotonic() - started))
+            if not clean[key] or budget <= 0:
+                result.tried += 1
+                result.skipped += 1
+                continue
             with tempfile.TemporaryDirectory(prefix="confidence-pyc-") as pyc:
+                # A fresh bytecode cache: same-size edits made within one second could
+                # otherwise reuse the cached, unmutated bytecode.
                 env["PYTHONPYCACHEPREFIX"] = pyc
-                clean[key] = _run(workdir, tests, env, normal) is False
-        if not clean[key]:
+                try:
+                    file.write_bytes(apply(sources[mutant.path], mutant).encode(encodings[mutant.path]))
+                    killed = _run(workdir, tests, env, budget)
+                finally:
+                    file.write_bytes(originals[mutant.path])  # byte for byte, line endings included
+            if killed == TIMEOUT:
+                # A hang the tests noticed, unless it was the overall budget that cut the run short.
+                killed = None if budget < normal else True
             result.tried += 1
-            result.skipped += 1
-            continue
-        with tempfile.TemporaryDirectory(prefix="confidence-pyc-") as pyc:
-            # A fresh bytecode cache: same-size edits made within one second could
-            # otherwise reuse the cached, unmutated bytecode.
-            env["PYTHONPYCACHEPREFIX"] = pyc
-            try:
-                file.write_bytes(apply(sources[mutant.path], mutant).encode(encodings[mutant.path]))
-                killed = _run(workdir, tests, env, budget)
-            finally:
-                file.write_bytes(originals[mutant.path])  # byte for byte, line endings included
-        if killed == TIMEOUT:
-            # A hang the tests noticed, unless it was the overall budget that cut the run short.
-            killed = None if budget < normal else True
-        result.tried += 1
-        if killed is None:
-            result.skipped += 1
-        elif killed:
-            result.killed += 1
-        else:
-            result.survived.append(mutant.describe())
-    shutil.rmtree(scratch, ignore_errors=True)
+            if killed is None:
+                result.skipped += 1
+            elif killed:
+                result.killed += 1
+            else:
+                result.survived.append(mutant.describe())
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     if result.tried and result.skipped == result.tried:
         none = f"none of the {result.tried} mutants could be tested (the covering tests didn't run cleanly)"
         result.note = f"{result.note}; {none}" if result.note else none

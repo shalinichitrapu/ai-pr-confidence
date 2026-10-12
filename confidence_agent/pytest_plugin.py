@@ -73,17 +73,18 @@ def _capture(record: logging.LogRecord) -> None:
     )
 
 
-_original_handle = logging.Logger.handle
+_original_call_handlers = logging.Logger.callHandlers
 
 
-def _handle(self, record):
+def _call_handlers(self, record):
     # Captured where every logger passes, not through a root handler: a project's
     # logging.config.dictConfig can remove handlers, and propagate=False loggers
-    # never reach the root.
-    if record.levelno >= logging.WARNING and not self.disabled and not getattr(record, "_confidence_seen", False):
-        record._confidence_seen = True
+    # never reach the root. callHandlers runs once per record, on the logger that
+    # created it, after that logger's own filters: a record the project filters
+    # out isn't captured, and the record itself isn't changed.
+    if record.levelno >= logging.WARNING:
         _capture(record)
-    return _original_handle(self, record)
+    return _original_call_handlers(self, record)
 
 
 def _tag_span(span, parent_context=None) -> None:
@@ -102,7 +103,7 @@ def _tag_span(span, parent_context=None) -> None:
 
 def pytest_configure(config):  # noqa: D401 - pytest hook
     global _exporter, _metric_reader
-    logging.Logger.handle = _handle
+    logging.Logger.callHandlers = _call_handlers
     root = logging.getLogger()
     if root.level > logging.WARNING or root.level == logging.NOTSET:
         root.setLevel(logging.WARNING)
@@ -200,6 +201,19 @@ def pytest_runtest_setup(item):
     global _current_test
     _current_test = item.nodeid
     _coverage_context(item.nodeid)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    yield
+    if fixturedef.scope != "function":
+        # Finalizers run last-in first-out, so this runs just before the shared
+        # fixture's own teardown: what that teardown logs belongs to no single test
+        # (crediting it to whichever test ran last would move it when tests change).
+        def shared_teardown():
+            global _current_test
+            _current_test = None
+        fixturedef.addfinalizer(shared_teardown)
 
 
 @pytest.hookimpl(hookwrapper=True)
