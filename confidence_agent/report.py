@@ -35,17 +35,18 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str],
         md += [f"> ⚠️ **Results may be unreliable.** {warning}", ""]
 
     md += ["| Signal | Impact | Evidence |", "|---|---:|---|"]
-    for signal, pts, reason in score.deductions:
-        md.append(f"| {signal} | −{pts} | {reason} |")
+    keys = getattr(score, "keys", []) or [""] * len(score.deductions)
+    for (signal, pts, reason), key in zip(score.deductions, keys):
+        hint = f" <sub>(ack: `confidence-ack:{key}`)</sub>" if key and key not in ("tests-failing", "no-tests") else ""
+        md.append(f"| {signal} | −{pts} | {reason}{hint} |")
     for signal, pts, reason, who in score.acknowledged:
         md.append(f"| {signal} | 0 (−{pts} acknowledged by {who}) | {reason} |")
     for check in score.passed_checks:
         md.append(f"| ✓ | 0 | {check} |")
     md.append("")
-    ackable = [k for k in dict.fromkeys(getattr(score, "keys", [])) if k not in ("tests-failing", "no-tests")]
-    if ackable:
-        labels = ", ".join(f"`confidence-ack:{k}`" for k in ackable)
-        md += [f"<sub>If a deduction is expected, a reviewer can acknowledge it with a label: {labels}.</sub>", ""]
+    if any(k not in ("tests-failing", "no-tests") for k in keys if k):
+        md += ["<sub>If a deduction is expected, a reviewer can acknowledge it by adding the label shown on "
+               "its row.</sub>", ""]
     for note in notes:
         md += [f"_{note}_", ""]
 

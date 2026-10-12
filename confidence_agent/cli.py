@@ -129,6 +129,9 @@ def main(argv=None) -> int:
                              f"(@{who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
             else:
                 acks[signal] = f"@{who}"
+    for key in sorted(set(acks) - scoring.KEYS):
+        notes.append(f"Ignored confidence-ack:{key}: no deduction has that key. Use the key shown on the "
+                     "deduction's row, e.g. tests-removed or metrics.")
     for key in sorted(set(acks) & scoring.UNACKABLE):
         notes.append(f"Ignored confidence-ack:{key}: newly failing tests and missing test results "
                      "can't be acknowledged; they need fixing.")

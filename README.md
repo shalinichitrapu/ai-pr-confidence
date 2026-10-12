@@ -215,10 +215,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
-concurrency:
-  group: confidence-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
   pull-requests: write
@@ -226,9 +222,9 @@ permissions:
 
 jobs:
   score:
-    if: >-
-      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
-      || startsWith(github.event.label.name, 'confidence-ack:')
+    concurrency:  # a newer event cancels an older run
+      group: confidence-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -263,10 +259,11 @@ The agent posts a single comment and updates it on each new push. Add
 
 **Acknowledging a deduction.** When a deduction is expected (say a metric grows
 because of a wanted feature), a reviewer can add a label named
-`confidence-ack:<key>`; the report lists the key for each deduction, e.g.
+`confidence-ack:<key>`; each deduction's row in the report shows its key, e.g.
 `confidence-ack:metrics` or `confidence-ack:tests-removed`. Each kind of deduction has
 its own key, so acknowledging a removed test never hides a failing one. The workflow
-reruns when such a label is added or removed. The deduction stays in the report,
+reruns when labels change (any label: a skipped run would show as a passing check).
+A label with an unknown key is ignored, with a note in the report. The deduction stays in the report,
 shown as "0 (−10 acknowledged by @reviewer)", and no longer counts toward the score or
 `--min-score` until the label is removed. Newly failing tests and missing test results
 can't be acknowledged. Labels added by the pull request's own author are ignored
