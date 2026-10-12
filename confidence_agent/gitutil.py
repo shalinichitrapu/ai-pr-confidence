@@ -53,6 +53,9 @@ class Diff:
     lines_added: int = 0
     lines_removed: int = 0
     added_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> added lines
+    head_source: Dict[str, str] = field(default_factory=dict)  # changed .py file -> its text at head
+    removed_lines: Dict[str, Set[int]] = field(default_factory=dict)  # old path -> base line numbers removed
+    base_source: Dict[str, str] = field(default_factory=dict)  # .py file with removals -> its text at base
     removed_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> removed lines
 
     @property
@@ -60,7 +63,7 @@ class Diff:
         return self.lines_added + self.lines_removed
 
 
-_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
 def _numstat(repo: Path, base: str, head: str) -> List[Tuple[str, str, str, str]]:
@@ -118,9 +121,14 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
         if m:
             in_header = False
             if current:
+                start = int(m.group(3))
+                count = int(m.group(4)) if m.group(4) is not None else 1
+                diff.added_lines[current].update(range(start, start + count))
+            if old:
                 start = int(m.group(1))
                 count = int(m.group(2)) if m.group(2) is not None else 1
-                diff.added_lines[current].update(range(start, start + count))
+                if count:
+                    diff.removed_lines.setdefault(old, set()).update(range(start, start + count))
             continue
         if in_header:
             continue
@@ -128,4 +136,14 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
             diff.added_text.setdefault(current, []).append(line[1:])
         elif line.startswith("-") and old:
             diff.removed_text.setdefault(old, []).append(line[1:])
+    for path in diff.added_lines:
+        if path.endswith(".py"):
+            text = read_file(repo, head, path)
+            if text is not None:
+                diff.head_source[path] = text
+    for path in diff.removed_lines:
+        if path.endswith(".py"):
+            text = read_file(repo, base, path)
+            if text is not None:
+                diff.base_source[path] = text
     return diff

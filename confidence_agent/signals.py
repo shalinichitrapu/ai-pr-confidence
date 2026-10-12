@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import re
 import statistics
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
 from .gitutil import Diff
+from .swallow import new_silent_excepts, removed_silent_handlers
 from .runner import RunResult
 
 # Thresholds (how much slower, how much a metric or memory must grow) come from
@@ -217,6 +219,9 @@ def _without_ignored(diff: Diff, cfg: Config) -> Tuple[Diff, List[str]]:
         lines_removed=diff.lines_removed,
         added_text=keep(diff.added_text),
         removed_text=keep(diff.removed_text),
+        head_source=keep(diff.head_source),
+        removed_lines=keep(diff.removed_lines),
+        base_source=keep(diff.base_source),
     )
     return kept, ignored
 
@@ -228,6 +233,15 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     s = Signals(otel_enabled=head.otel_enabled)
     diff, s.ignored_files = _without_ignored(diff, cfg)
     s.hidden_code = _hidden_code(diff, tests_path)
+    removed = removed_silent_handlers(diff.base_source, diff.removed_lines)
+    silenced = [
+        finding
+        for path, text in sorted(diff.head_source.items())
+        if not _is_test_file(path, tests_path)
+        for finding in new_silent_excepts(path, text, diff.added_lines.get(path, ()), removed)
+    ]
+    if silenced:
+        s.hidden_code["errors silenced without a trace"] = silenced
 
     s.tests_total = len(head.tests)
     s.tests_failed = head.failed

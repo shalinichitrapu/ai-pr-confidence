@@ -84,7 +84,7 @@ def score(s: Signals, config: Optional[Config] = None) -> Score:
         deductions.append(("Visibility", w.visibility.points(len(s.hidden_code)),
                            f"Code hidden from these checks: {kinds}"))
     else:
-        passed.append("No coverage exclusions added or instrumentation removed")
+        passed.append("No coverage exclusions, removed instrumentation or silenced errors")
 
     # 5. Metrics and memory, compared within the same test
     if s.metrics_enabled:

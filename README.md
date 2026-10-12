@@ -43,7 +43,7 @@ automatic first check worth having. It doesn't replace code review.
 | No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
 | Tests removed | −15 (a test whose file was renamed, keeping its name, counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
-| Code hidden from these checks: new `# pragma: no cover`, or error logging, tracing or metric instruments removed (net, so moved code doesn't count) | −10 per kind (max −20) | Hiding code from coverage or telemetry raises the score without making the code safer |
+| Code hidden from these checks: new `# pragma: no cover`; error logging, tracing or metric instruments removed (net, so moved code doesn't count); or a new broad `except` that drops the error without raising, logging or recording it | −10 per kind (max −20) | Hiding code or errors from coverage and telemetry raises the score without making the code safer |
 | New ERROR log signatures | −20 first, −5 each more (max −25), so one is enough to leave High | Errors swallowed and logged while tests stay green |
 | New exceptions recorded on spans | −10 first, −5 each more (max −15) | Same, seen through traces |
 | Traced operations ≥2× slower (and ≥5 ms) | −10 each (max −20) | Performance regressions |
