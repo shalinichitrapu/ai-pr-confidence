@@ -28,6 +28,10 @@ class Score:
 
 # Deductions a reviewer can't wave through: a broken or unmeasured change has to be fixed.
 UNACKABLE = {"tests-failing", "no-tests"}
+# Every acknowledgement key, one per kind of deduction.
+KEYS = {"no-tests", "tests-failing", "tests-flaky", "tests-removed", "coverage", "mutation", "logs",
+        "logs-new-tests", "traces-new-tests", "traces", "latency", "visibility", "security", "dependencies",
+        "metrics", "memory", "size"}
 
 
 def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, str]] = None) -> Score:

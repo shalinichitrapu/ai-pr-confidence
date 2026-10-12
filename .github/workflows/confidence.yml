@@ -5,12 +5,6 @@ on:
     # labeled/unlabeled: rescore when a reviewer adds or removes a confidence-ack:<key> label
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
-# One run per pull request at a time; a newer event cancels an older run, so a
-# slow run that started before a label change can't overwrite the newer score.
-concurrency:
-  group: confidence-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
   pull-requests: write
@@ -18,10 +12,13 @@ permissions:
 
 jobs:
   score:
-    # Other labels (e.g. "bug") don't change the score.
-    if: >-
-      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
-      || startsWith(github.event.label.name, 'confidence-ack:')
+    # Every event rescores, including unrelated labels: a skipped job would show
+    # as a passing check and could hide a failing score. One run per pull
+    # request at a time; a newer event cancels an older run, so a slow run that
+    # started before a label change can't overwrite the newer score.
+    concurrency:
+      group: confidence-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -76,9 +76,12 @@ def test_span_finishing_during_a_later_test_belongs_to_the_test_that_started_it(
     assert spans["app.slow_job"] == "tests/test_bg.py::test_a_starts_background_work"
 
 
-def test_child_span_started_later_in_a_thread_inherits_its_parents_test(spans):
+def test_spans_are_credited_to_the_test_running_when_they_start(spans):
+    # The documented limit: work handed to a thread that starts after its test ended
+    # counts for the test running then. (Inheriting the parent's test instead would
+    # misattribute everything a long-lived worker does; see the worker test below.)
     assert spans["app.parent"] == "tests/test_bg.py::test_a_starts_background_work"
-    assert spans["app.child"] == "tests/test_bg.py::test_a_starts_background_work"
+    assert spans["app.child"] == "tests/test_bg.py::test_b_runs_while_it_finishes"
 
 
 WORKER_APP = '''
@@ -104,8 +107,11 @@ WORKER_TESTS = '''
 import asyncio
 
 import pytest
+from opentelemetry import trace
 
 from app import worker
+
+tracer = trace.get_tracer("tests")
 
 
 @pytest.fixture(scope="module")
@@ -113,7 +119,8 @@ def service():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)  # Python 3.9 binds the queue to the current loop
     queue = asyncio.Queue()
-    task = loop.create_task(worker(queue))  # created during the first test's setup
+    with tracer.start_as_current_span("server.start"):  # the worker is created inside a span
+        task = loop.create_task(worker(queue))  # ...during the first test's setup
     yield loop, queue
     task.cancel()
     loop.run_until_complete(asyncio.sleep(0))

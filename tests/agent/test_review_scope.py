@@ -14,7 +14,7 @@ def test_requirements_changes():
     base = "requests==2.31.0\n# comment\n-r other.txt\nflask>=2\nold-lib\n"
     head = "requests==2.32.0\nflask>=2  # same\nnew_lib[extra]>=1.0\n"
     assert dependency_changes("requirements.txt", base, head) == [
-        "requirements.txt: added new-lib >=1.0",
+        "requirements.txt: added new-lib[extra] >=1.0",
         "requirements.txt: requests ==2.31.0 → ==2.32.0",
     ]
 
@@ -25,9 +25,9 @@ def test_pyproject_changes_including_extras_and_poetry():
             '[project.optional-dependencies]\ndev = ["black"]\n'
             '[tool.poetry.dependencies]\npython = "^3.9"\nhttpx = "^0.27"\n')
     assert dependency_changes("pyproject.toml", base, head) == [
-        "pyproject.toml: added black",
-        "pyproject.toml: added httpx ^0.27",
-        "pyproject.toml: pytest >=7 → >=8",
+        "pyproject.toml ([project] dependencies): pytest >=7 → >=8",
+        "pyproject.toml (optional-dependencies.dev): added black",
+        "pyproject.toml (poetry): added httpx ^0.27",
     ]
 
 
@@ -186,3 +186,46 @@ def test_config_only_warning_is_for_infrastructure_only():
     assert not config_only(["templates/page.html"])
     assert not config_only(["tests/fixtures/rates.json"])
     assert not config_only(["app.py", "deploy.yaml"])
+
+
+# --- re-review fixes ----------------------------------------------------------
+
+def test_one_file_or_table_cant_hide_a_change_in_another():
+    loosened = all_dependency_changes([
+        ("pyproject.toml", '[project]\ndependencies = ["django>=4.2"]\n', '[project]\ndependencies = ["django>=1.0"]\n'),
+        ("requirements.txt", "django==4.2.1\n", "django==4.2.1\nbar==1\n"),
+    ])
+    assert "pyproject.toml ([project] dependencies): django >=4.2 → >=1.0" in loosened
+    same_file = dependency_changes(
+        "pyproject.toml",
+        '[project]\ndependencies = ["requests>=2.31"]\n[dependency-groups]\ndev = ["requests"]\n',
+        '[project]\ndependencies = ["requests>=0.1"]\n[dependency-groups]\ndev = ["requests"]\n',
+    )
+    assert same_file == ["pyproject.toml ([project] dependencies): requests >=2.31 → >=0.1"]
+
+
+def test_removing_a_pin_isnt_reported_as_a_change_elsewhere():
+    assert all_dependency_changes([("requirements.txt", "foo==1.5\n", ""),
+                                   ("pyproject.toml", '[project]\ndependencies = ["foo>=1"]\n',
+                                    '[project]\ndependencies = ["foo>=1"]\n')]) == []
+
+
+def test_new_extras_are_reported_and_formatting_isnt():
+    assert dependency_changes("requirements.txt", "requests==2.31\n", "requests[socks]==2.31\n") == [
+        "requirements.txt: added requests[socks] ==2.31"]
+    a = 'foo==1; python_version<"3.8" and sys_platform=="win32"\nbar>=1,<2\n'
+    b = "foo==1; sys_platform=='win32' and python_version < '3.8'\nbar<2, >=1\n"
+    assert dependency_changes("requirements.txt", a, b) == []
+    assert is_dependency_file("dev-requirements.in")
+
+
+def test_secret_heuristics():
+    src = ('AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"\nTOKENIZER_NAME = "bert-base-uncased"\n'
+           'API_TOKEN = "f3a9c2e17b4d"\nPASSWORD_ENV_VAR = "APP_PASSWORD"\n')
+    found = [f.split(": ", 1)[1] for f in risky_code("a.py", src, range(1, 5))]
+    assert found == ["hard-coded secret in AWS_ACCESS_KEY", "hard-coded secret in API_TOKEN"]
+
+
+def test_yaml_next_to_tests_or_templates_isnt_unmeasured():
+    assert unmeasured(["tests/fixtures/cases.yaml", "app/templates/email.yml", "deploy.yaml"]) == ["deploy.yaml"]
+    assert not config_only(["tests/fixtures/cases.yaml"])

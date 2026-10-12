@@ -65,13 +65,16 @@ def main(argv=None) -> int:
         # Don't block every pull request (including the one fixing it) on a broken base.
         cfg = config.Config()
         config_warnings.append(f"[tool.confidence] on {args.base} has a mistake, so defaults were used: {exc}")
+    head_toml = gitutil.read_file(repo, head_sha, "pyproject.toml") or ""
     try:
-        config.parse(gitutil.read_file(repo, head_sha, "pyproject.toml") or "")
+        config.parse(head_toml)
     except config.ConfigError as exc:
-        config_broken = True
-        config_warnings.append(f"This change's [tool.confidence] has a mistake; fix it before merging: {exc}")
-    for warning in config_warnings:
-        print(f"[confidence] WARNING: {warning}")
+        # Only this change's own mistake fails the run; one it inherited
+        # unchanged from the base would otherwise block every pull request.
+        start_toml = gitutil.read_file(repo, base_sha, "pyproject.toml") or ""
+        if config.raw_table(head_toml) != config.raw_table(start_toml):
+            config_broken = True
+            config_warnings.append(f"This change's [tool.confidence] has a mistake; fix it before merging: {exc}")
     args.source = args.source or cfg.source or "."
     args.tests = args.tests or cfg.tests or "tests"
     args.min_score = args.min_score if args.min_score is not None else (cfg.min_score or 0)
@@ -113,7 +116,7 @@ def main(argv=None) -> int:
                     durations = {n: head.test_durations.get(runner.junit_id(n), 0.0) for n in head.node_ids}
                     head.mutation = mutate.run_mutations(
                         wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s,
-                        failing=failing, durations=durations,
+                        failing=failing, durations=durations, total_budget=cfg.thresholds.mutation_budget_s,
                     )
             # Only a clean base run is reused: a failure saved once (a flake, an
             # environment problem) would excuse that test failing on every later PR.
@@ -142,6 +145,9 @@ def main(argv=None) -> int:
                              f"(@{who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
             else:
                 acks[signal] = f"@{who}"
+    for key in sorted(set(acks) - scoring.KEYS):
+        notes.append(f"Ignored confidence-ack:{key}: no deduction has that key. Use the key shown on the "
+                     "deduction's row, e.g. tests-removed or metrics.")
     for key in sorted(set(acks) & scoring.UNACKABLE):
         notes.append(f"Ignored confidence-ack:{key}: newly failing tests and missing test results "
                      "can't be acknowledged; they need fixing.")

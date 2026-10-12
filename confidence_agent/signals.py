@@ -12,7 +12,7 @@ from .config import Config
 from .expectations import expects_exception, node_file
 from .gitutil import Diff
 from .review_scope import config_only, risky_code, unmeasured
-from .swallow import new_silent_excepts
+from .swallow import new_silent_excepts, removed_silent_handlers
 from .runner import RunResult
 
 # Thresholds (how much slower, how much a metric or memory must grow) come from
@@ -249,6 +249,8 @@ def _without_ignored(diff: Diff, cfg: Config) -> Tuple[Diff, List[str]]:
         removed_text=keep(diff.removed_text),
         head_source=keep(diff.head_source),
         dependency_changes=[c for c in diff.dependency_changes if not cfg.ignored(c.split(":", 1)[0])],
+        removed_lines=keep(diff.removed_lines),
+        base_source=keep(diff.base_source),
     )
     return kept, ignored
 
@@ -264,7 +266,7 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         s.mutants_survived = list(head.mutation.survived)
         s.mutation_note = head.mutation.note
     s.hidden_code = _hidden_code(diff, tests_path)
-    removed = Counter(line.strip() for lines in diff.removed_text.values() for line in lines if line.strip())
+    removed = removed_silent_handlers(diff.base_source, diff.removed_lines)
     silenced = [
         finding
         for path, text in sorted(diff.head_source.items())
@@ -372,6 +374,10 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     for scored, half in ((s.new_error_logs, s.new_test_error_logs), (s.new_span_exceptions, s.new_test_span_exceptions)):
         for sig in [k for k in half if k in scored]:
             scored[sig] += half.pop(sig)
+    # An error that's scored somewhere isn't also listed as expected and unscored.
+    scored_anywhere = {**s.new_error_logs, **s.new_span_exceptions, **s.new_test_error_logs,
+                       **s.new_test_span_exceptions}
+    s.new_test_expected_errors = {k: v for k, v in s.new_test_expected_errors.items() if k not in scored_anywhere}
 
     # Timings from a cached base run may come from another machine (in CI, an
     # earlier job's runner), so they aren't comparable with this run's.
