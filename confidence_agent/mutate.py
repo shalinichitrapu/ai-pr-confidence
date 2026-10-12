@@ -89,7 +89,7 @@ class Mutant:
     replacement: str
 
     def describe(self) -> str:
-        return f"{self.path}:{self.line}: `{self.original}` → `{self.replacement}`"
+        return f"{self.path}:{self.line}: {self.original} → {self.replacement}"
 
 
 @dataclass

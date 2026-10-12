@@ -37,3 +37,25 @@ def test_new_comment_is_created(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(cmd, 0, stdout="")
     monkeypatch.setattr(github.subprocess, "run", fake)
     assert github.post_comment(tmp_path, 7, "body") == "created"
+
+
+def test_only_our_own_comment_is_updated(monkeypatch, tmp_path):
+    calls = []
+
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if cmd[1:3] == ["api", "user"]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="")  # the Actions token can't read /user
+        if "--paginate" in cmd:
+            jq = cmd[cmd.index("--jq") + 1]
+            assert '.user.login == "github-actions[bot]"' in jq
+            return subprocess.CompletedProcess(cmd, 0, stdout="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="")
+
+    def run(cmd, **kw):
+        result = fake(cmd, **kw)
+        if result.returncode and kw.get("check"):
+            raise subprocess.CalledProcessError(result.returncode, cmd)
+        return result
+    monkeypatch.setattr(github.subprocess, "run", run)
+    assert github.post_comment(tmp_path, 7, "body") == "created"

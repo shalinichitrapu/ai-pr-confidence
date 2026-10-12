@@ -21,7 +21,7 @@ def test_acknowledged_deductions_are_shown_but_not_counted():
     assert [d[0] for d in r.deductions] == ["Size"]
     assert r.acknowledged == [("Metrics", 10, "1 metric(s) grew at least 2× in the same test", "@lead")]
     md = render(r, signals(), "a" * 40, "b" * 40, None)
-    assert "| Metrics | 0 (−10 acknowledged by @lead) |" in md
+    assert "| Metrics | 0 (−10 acknowledged by `@lead`) |" in md
 
 
 def test_unknown_acks_change_nothing():

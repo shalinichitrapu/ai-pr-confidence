@@ -166,9 +166,9 @@ def main(argv=None) -> int:
         for signal, who in labels.items():
             if who == author and not cfg.allow_self_ack:
                 notes.append(f"Ignored confidence-ack:{signal}: added by the pull request's author "
-                             f"(@{who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
+                             f"({who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
             else:
-                acks[signal] = f"@{who}"
+                acks[signal] = who
     for key in sorted(set(acks) - scoring.KEYS):
         notes.append(f"Ignored confidence-ack:{key}: no deduction has that key. Use the key shown on the "
                      "deduction's row, e.g. tests-removed or metrics.")

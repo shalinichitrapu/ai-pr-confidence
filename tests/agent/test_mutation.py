@@ -85,7 +85,7 @@ def test_run_mutations_kills_with_a_boundary_test_and_survives_without(tmp_path)
     weak = {"app.py": {"2": ["tests/test_weak.py::test_weak"]}}
     result = run_mutations(project, {"app.py": [2]}, weak, [str(project)])
     assert (result.killed, len(result.survived)) == (0, 2)
-    assert "app.py:2: `>=` → `>`" in result.survived
+    assert "app.py:2: >= → >" in result.survived
     assert (project / "app.py").read_text() == app  # restored
 
     both = {"app.py": {"2": ["tests/test_weak.py::test_weak", "tests/test_edge.py::test_edge"]}}

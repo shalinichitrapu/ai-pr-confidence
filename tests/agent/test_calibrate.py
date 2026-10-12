@@ -165,3 +165,12 @@ def test_squash_commit_listing_an_internal_revert_is_still_a_change(tmp_path):
     git(repo, "commit", "-qm", "Add feature Y (#12)", "-m",
         '* wip\n\n* Revert "wip"\n\nThis reverts commit 1234567890abcdef1234567890abcdef12345678.\n\n* finish')
     assert [c.subject for c in calibrate.changes(repo, "main", 10)] == ["Add feature Y (#12)"]
+
+
+def test_report_without_bad_outcomes_and_with_odd_subjects():
+    items = [Change("a" * 40, "", "", "fix | table", score=90, band="High", signals=["coverage"], outcome="good"),
+             Change("b" * 40, "", "", "empty merge", skipped="nothing to score")]
+    md = report(items)
+    assert "| coverage | 1 | 0 | – |" in md
+    assert "fix \\| table" in md
+    assert "| nothing to score |" in md

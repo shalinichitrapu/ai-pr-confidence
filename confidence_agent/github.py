@@ -66,14 +66,25 @@ def post_comment(repo: Path, pr_number: int, body: str) -> str:
         return f"not posted ({reason}); the report is in the job summary and confidence-report/"
 
 
+def _me(repo: Path) -> str:
+    """The account the comment is posted as. The Actions token can't read /user; it posts as github-actions[bot]."""
+    try:
+        return _gh(repo, "api", "user", "--jq", ".login").strip() or "github-actions[bot]"
+    except (subprocess.CalledProcessError, OSError):
+        return "github-actions[bot]"
+
+
 def _post(repo: Path, pr_number: int, body: str) -> str:
+    # Only our own earlier comment is updated: anyone can write a comment containing
+    # the marker, and updating theirs would put the report under their name.
+    me = json.dumps(_me(repo))
     ids = _gh(
         repo, "api", f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments", "--paginate",
-        "--jq", f'.[] | select((.body // "") | contains("{MARKER}")) | .id',
+        "--jq", f'.[] | select(.user.login == {me} and ((.body // "") | contains("{MARKER}"))) | .id',
     ).split()
     payload = json.dumps({"body": body})
     if ids:
-        _gh(repo, "api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/comments/{ids[0]}",
+        _gh(repo, "api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/comments/{ids[-1]}",
             "--input", "-", input_text=payload)
         return "updated"
     _gh(repo, "api", "-X", "POST", f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments",

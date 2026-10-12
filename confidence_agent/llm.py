@@ -33,7 +33,8 @@ Score: {score}/100 ({band})
 MAX_TEXT = 120  # characters kept from any single piece of evidence
 MAX_BULLETS = 4
 MAX_BULLET = 240
-_URL = re.compile(r"https?://\S+")
+_URL = re.compile(r"\b(?:[a-z][a-z0-9+.-]*://|www\.)\S+", re.IGNORECASE)
+_REF_LINK = re.compile(r"^\[[^\]]+\]:")  # reference-style link definitions
 
 
 def _clip(value: Any) -> Any:
@@ -55,8 +56,12 @@ def clean_summary(text: str) -> Optional[str]:
         line = line.strip()
         if not line.startswith(("- ", "* ")):
             continue
-        line = _URL.sub("[link removed]", line[2:].strip())
-        line = line.replace("<", "&lt;").replace(">", "&gt;").replace("](", "] (")
+        line = line[2:].strip()
+        if _REF_LINK.match(line):
+            continue
+        line = _URL.sub("[link removed]", line)
+        line = (line.replace("<", "&lt;").replace(">", "&gt;").replace("](", "] (").replace("][", "] [")
+                .replace("`", "'").replace("@", "@\u200b"))  # no code fences; mentions don't ping
         if len(line) > MAX_BULLET:
             line = line[: MAX_BULLET - 1] + "…"
         bullets.append(f"- {line}")
