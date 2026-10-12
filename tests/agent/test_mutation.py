@@ -184,5 +184,17 @@ def test_total_budget_stops_mutation_testing(tmp_path):
 
 
 def test_receivers_that_merely_contain_log_arent_loggers():
-    src = "def f(catalog, x):\n    catalog.error(x + 1)\n    self_logger.error(x)\n    logging.info(x)\n"
-    assert telemetry_lines(src) == {3, 4}
+    src = ("def f(catalog, x):\n    catalog.error(x + 1)\n    self_logger.error(x)\n    logging.info(x)\n"
+           "    app_log.warning(x)\n    logging.getLogger(__name__).error(x)\n")
+    assert telemetry_lines(src) == {3, 4, 5, 6}
+
+
+def test_overall_budget_limits_a_slow_mutant(tmp_path):
+    import time as _time
+    project = weak_project(tmp_path, "\ndef test_slow():\n    time.sleep(3)\n    assert is_adult(40)\n")
+    ctx = {"app.py": {"2": ["tests/test_a.py::test_slow"]}}
+    started = _time.monotonic()
+    run_mutations(project, {"app.py": [2]}, ctx, [str(project)], timeout=60.0, total_budget=1.0,
+                  durations={"tests/test_a.py::test_slow": 3.0})
+    # The first mutant always runs (about 3s); the second gets only what's left of the 1s budget.
+    assert _time.monotonic() - started < 8

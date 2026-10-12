@@ -60,8 +60,10 @@ Bands: **High** ≥ 85, **Medium** 60–84, **Low** < 60.
 Changed CI, deployment and configuration files (YAML, INI, Dockerfiles, `.github/`,
 shell scripts and similar) are listed in the report for direct review, since tests
 don't load them. If a change touches only those, the report warns that the score
-says little about it. Templates and data files aren't listed, because tests often
-exercise them.
+says little about it. HTML templates, JSON and other data files aren't listed, and
+neither is anything under `tests/`, `fixtures/` or `testdata/`, because tests usually
+load those. YAML under `templates/` is listed, since Helm and Kubernetes charts keep
+deployment config there.
 
 Logs, exceptions on spans and latency are scored fully only for tests that exist
 both before and after the change, because those ran the same inputs. Errors that
