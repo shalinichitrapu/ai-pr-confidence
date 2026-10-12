@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .config import Config
 from .expectations import expects_exception, node_file
 from .gitutil import Diff
+from .review_scope import config_only, risky_code, unmeasured
 from .swallow import new_silent_excepts, removed_silent_handlers
 from .runner import RunResult
 
@@ -31,6 +32,9 @@ class Signals:
     tests_added: List[str] = field(default_factory=list)
     mutants_tested: int = 0  # mutants that ran (killed + survived)
     mutants_survived: List[str] = field(default_factory=list)  # changes no covering test noticed
+    dependency_changes: List[str] = field(default_factory=list)  # added or changed packages
+    risky_code: List[str] = field(default_factory=list)  # security-sensitive calls on changed lines
+    unmeasured_files: List[str] = field(default_factory=list)  # config/data files tests can't exercise
     mutation_note: str = ""  # why mutation testing didn't run or couldn't conclude
     tests_flaky: List[str] = field(default_factory=list)  # newly failed, then passed on a rerun
     tests_moved: Dict[str, str] = field(default_factory=dict)  # old id -> new id, same test name
@@ -243,6 +247,7 @@ def _without_ignored(diff: Diff, cfg: Config) -> Tuple[Diff, List[str]]:
         added_text=keep(diff.added_text),
         removed_text=keep(diff.removed_text),
         head_source=keep(diff.head_source),
+        dependency_changes=[c for c in diff.dependency_changes if not cfg.ignored(c.split(":", 1)[0])],
         removed_lines=keep(diff.removed_lines),
         base_source=keep(diff.base_source),
     )
@@ -269,6 +274,20 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     ]
     if silenced:
         s.hidden_code["errors silenced without a trace"] = silenced
+
+    s.dependency_changes = list(diff.dependency_changes)
+    s.risky_code = [
+        finding
+        for path, text in diff.head_source.items()
+        if not _is_test_file(path, tests_path)
+        for finding in risky_code(path, text, diff.added_lines.get(path, ()))
+    ]
+    s.unmeasured_files = unmeasured(diff.files_changed)
+    if config_only(diff.files_changed):
+        s.warnings.append(
+            "This change only touches files the tests can't exercise (configuration, CI or "
+            "infrastructure), so the score says little about it. Review those files directly."
+        )
 
     s.tests_total = len(head.tests)
     base_failed = set(base.failed)

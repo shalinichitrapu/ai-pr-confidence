@@ -54,6 +54,7 @@ class Diff:
     lines_removed: int = 0
     added_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> added lines
     head_source: Dict[str, str] = field(default_factory=dict)  # changed .py file -> its text at head
+    dependency_changes: List[str] = field(default_factory=list)  # "path: added pkg >=1" etc.
     removed_lines: Dict[str, Set[int]] = field(default_factory=dict)  # old path -> base line numbers removed
     base_source: Dict[str, str] = field(default_factory=dict)  # .py file with removals -> its text at base
     removed_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> removed lines
@@ -141,6 +142,11 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
             text = read_file(repo, head, path)
             if text is not None:
                 diff.head_source[path] = text
+    from .review_scope import all_dependency_changes, is_dependency_file
+    diff.dependency_changes = all_dependency_changes(
+        (path, read_file(repo, base, diff.renamed.get(path, path)), read_file(repo, head, path))
+        for path in diff.files_changed if is_dependency_file(path)
+    )
     for path in diff.removed_lines:
         if path.endswith(".py"):
             text = read_file(repo, base, path)

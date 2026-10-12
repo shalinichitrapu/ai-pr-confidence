@@ -25,6 +25,7 @@ def test_clean_change_scores_100_with_every_check_listed():
         "No new exceptions in traces",
         "No latency regressions in traced operations",
         "No coverage exclusions, removed instrumentation or silenced errors",
+        "No security-sensitive calls on changed lines",
         "No unusual changes in app metrics",
         "No memory growth in tests",
     ]
@@ -35,6 +36,7 @@ def test_disabled_checks_are_neither_passed_nor_deducted():
     assert r.value == 100
     assert r.passed_checks == [
         "All 3 tests pass", "No new ERROR logs", "No coverage exclusions, removed instrumentation or silenced errors",
+        "No security-sensitive calls on changed lines",
     ]
 
 
