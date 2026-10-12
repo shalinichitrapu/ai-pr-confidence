@@ -158,7 +158,8 @@ metric_min_delta = 3.0
 memory_ratio = 2.0
 memory_min_delta_mb = 5.0
 max_mutants = 20               # mutation testing budget per run; 0 turns it off
-mutant_timeout_s = 60.0
+mutant_timeout_s = 60.0       # each mutant also gets at least 5x its tests' normal time
+mutation_budget_s = 300.0      # all mutants together; the rest are skipped when it runs out
 
 [tool.confidence.weights]      # [first finding, each additional, maximum]
 tests_failing = [45, 5, 55]

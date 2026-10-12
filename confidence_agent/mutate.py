@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,7 +66,9 @@ def telemetry_lines(source: str) -> set:
                 and isinstance(node.value.func, ast.Attribute)):
             continue
         method, receiver = node.value.func.attr, ast.unparse(node.value.func.value)
-        if ((method in LOG_CALLS and "log" in receiver.lower()) or method in SPAN_CALLS
+        last = receiver.rsplit(".", 1)[-1].lower().lstrip("_")
+        logger_like = last in ("log", "logger", "logging") or last.endswith("logger")
+        if ((method in LOG_CALLS and logger_like) or method in SPAN_CALLS
                 or (method in INSTRUMENT_CALLS and receiver in instruments)):
             lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
     return lines
@@ -143,7 +146,8 @@ def choose(candidates: Dict[Tuple[str, int], List[Mutant]], limit: int) -> List[
 
 def _run(workdir: Path, node_ids: List[str], env: Dict[str, str], timeout: float) -> Optional[bool]:
     """True if a test failed (mutant killed), False if all passed, None if it couldn't run."""
-    cmd = [sys.executable, "-m", "pytest", *node_ids, "-x", "-q", "-p", "no:cacheprovider"]
+    cmd = [sys.executable, "-m", "pytest", *node_ids, "-x", "-q", "-p", "no:cacheprovider",
+           "-p", "no:randomly", "-p", "no:random_order"]
     if importlib.util.find_spec("xdist") is not None:
         cmd += ["-n", "0"]
     try:
@@ -171,7 +175,8 @@ def _test_ids(contexts: List[str], failing: Set[str]) -> List[str]:
 
 def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict[str, Dict[str, List[str]]],
                   import_paths: List[str], limit: int = 20, timeout: float = 60.0,
-                  failing: Iterable[str] = (), durations: Optional[Dict[str, float]] = None) -> MutationResult:
+                  failing: Iterable[str] = (), durations: Optional[Dict[str, float]] = None,
+                  total_budget: float = 300.0) -> MutationResult:
     """Mutate covered changed lines in the checkout and run the tests that cover each one.
 
     lines: path -> changed line numbers to consider (already limited to covered source lines).
@@ -179,6 +184,8 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
     failing: node ids that fail (or are flaky) without any mutant; they're never used.
     durations: node id -> seconds in the head run; each mutant gets at least 5x
         its covering tests' normal time, so slow tests aren't mistaken for hangs.
+    total_budget: seconds for all mutants together; when it runs out, the rest
+        are skipped and the report says how many were tested.
     """
     failing = set(failing)
     durations = durations or {}
@@ -213,7 +220,12 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(p for p in (*import_paths, env.get("PYTHONPATH", "")) if p)
     env.pop("PYTEST_ADDOPTS", None)
-    for mutant in chosen:
+    started = time.monotonic()
+    for i, mutant in enumerate(chosen):
+        if i and time.monotonic() - started > total_budget:  # always try at least one
+            result.note = (f"stopped after {i} of {len(chosen)} mutants: the {total_budget:g}s mutation "
+                           "budget ran out (mutation_budget_s)")
+            break
         file = workdir / mutant.path
         tests = _test_ids(contexts[mutant.path][str(mutant.line)], failing)
         budget = max(timeout, 5 * sum(durations.get(t, 0.0) for t in tests) + 10)
@@ -233,6 +245,6 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
             result.killed += 1
         else:
             result.survived.append(mutant.describe())
-    if result.tried and result.skipped == result.tried:
+    if result.tried and result.skipped == result.tried and not result.note:
         result.note = f"none of the {result.tried} mutants could be tested (the covering tests didn't run cleanly)"
     return result

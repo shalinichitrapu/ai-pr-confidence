@@ -174,3 +174,15 @@ def test_unusable_contexts_are_reported_not_silently_passed(tmp_path):
     ctx = {"app.py": {"2": ["test_a.test_weak"]}}  # dynamic_context = "test_function"
     result = run_mutations(project, {"app.py": [2]}, ctx, [str(project)])
     assert result.tried == 0 and "dynamic_context" in result.note
+
+
+def test_total_budget_stops_mutation_testing(tmp_path):
+    project = weak_project(tmp_path)
+    ctx = {"app.py": {"2": ["tests/test_a.py::test_weak"]}}
+    result = run_mutations(project, {"app.py": [2]}, ctx, [str(project)], total_budget=0.0)
+    assert result.tried == 1 and "stopped after 1 of 2 mutants" in result.note
+
+
+def test_receivers_that_merely_contain_log_arent_loggers():
+    src = "def f(catalog, x):\n    catalog.error(x + 1)\n    self_logger.error(x)\n    logging.info(x)\n"
+    assert telemetry_lines(src) == {3, 4}

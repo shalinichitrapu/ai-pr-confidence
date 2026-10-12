@@ -83,6 +83,7 @@ class Thresholds:
     memory_min_delta_mb: float = 5.0
     max_mutants: int = 20  # 0 turns mutation testing off
     mutant_timeout_s: float = 60.0
+    mutation_budget_s: float = 300.0  # all mutants together; the rest are skipped when it runs out
 
 
 @dataclass

@@ -101,7 +101,7 @@ def main(argv=None) -> int:
                     durations = {n: head.test_durations.get(runner.junit_id(n), 0.0) for n in head.node_ids}
                     head.mutation = mutate.run_mutations(
                         wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s,
-                        failing=failing, durations=durations,
+                        failing=failing, durations=durations, total_budget=cfg.thresholds.mutation_budget_s,
                     )
             gitutil.remove_worktree(repo, wt)
     finally:
