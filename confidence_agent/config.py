@@ -136,15 +136,19 @@ def _strings(value: Any, where: str) -> List[str]:
     return value
 
 
-def raw_table(text: str) -> Any:
-    """The [tool.confidence] table as written (or the text itself if it isn't valid TOML).
+INVALID_TOML = object()
 
-    Used to tell whether a pull request changed the table.
+
+def raw_table(text: str) -> Any:
+    """The [tool.confidence] table as written, or INVALID_TOML if the file doesn't parse.
+
+    Used to tell whether a pull request changed the table: a file that was
+    already invalid and still is counts as unchanged, whatever else was edited.
     """
     try:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
-        return text
+        return INVALID_TOML
     tool = doc.get("tool")
     return tool.get("confidence") if isinstance(tool, dict) else tool
 

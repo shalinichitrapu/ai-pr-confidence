@@ -226,6 +226,28 @@ def test_secret_heuristics():
     assert found == ["hard-coded secret in AWS_ACCESS_KEY", "hard-coded secret in API_TOKEN"]
 
 
-def test_yaml_next_to_tests_or_templates_isnt_unmeasured():
-    assert unmeasured(["tests/fixtures/cases.yaml", "app/templates/email.yml", "deploy.yaml"]) == ["deploy.yaml"]
+def test_yaml_next_to_tests_isnt_unmeasured():
+    # Test data is loaded by tests. YAML under templates/ is often Helm/Kubernetes deployment config, so it counts.
+    assert unmeasured(["tests/fixtures/cases.yaml", "testdata/x.yml", "deploy.yaml"]) == ["deploy.yaml"]
     assert not config_only(["tests/fixtures/cases.yaml"])
+
+
+def test_marker_values_containing_and_stay_whole():
+    a = 'foo==1; sys_platform == "android" and python_version >= "3.8"\n'
+    b = "foo==1; python_version>='3.8' and sys_platform=='android'\n"
+    assert dependency_changes("requirements.txt", a, b) == []
+    added = dependency_changes("requirements.txt", "", a)[0]
+    assert 'sys_platform=="android"' in added and 'python_version>="3.8"' in added
+
+
+def test_deployment_templates_are_unmeasured():
+    paths = ["charts/app/templates/deployment.yaml", "deploy/templates/k8s.yml"]
+    assert unmeasured(paths) == sorted(paths)
+    assert config_only(paths)
+
+
+def test_more_secret_shapes():
+    src = ('password = "supersecretpassword"\nMODEL_TOKEN_NAME = "sk-learn-model"\n'
+           'STRIPE_PUBLISHABLE_KEY_ENV = "STRIPE_PK"\nOPENAI_API_KEY = "sk-abcdefghijklmnopqrstuvwx"\n')
+    found = [f.split(": ", 1)[1] for f in risky_code("a.py", src, range(1, 5))]
+    assert found == ["hard-coded secret in password", "hard-coded secret in OPENAI_API_KEY"]
