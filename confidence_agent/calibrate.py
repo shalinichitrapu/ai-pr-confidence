@@ -51,9 +51,10 @@ def changes(repo: Path, branch: str, limit: int) -> List[Change]:
 
     Every commit on the first-parent line is one change: a merge covers what it
     merged, and a direct or squashed commit covers itself. Histories that mix
-    both styles are scored in full.
+    both styles are scored in full. Revert commits aren't changes of their own:
+    they're how a change's outcome is found. The root commit is skipped.
     """
-    log = gitutil.git(repo, "log", "--first-parent", f"-{limit}", "--format=%H %P%x00%s%x00%b%x01", branch)
+    log = gitutil.git(repo, "log", "--first-parent", "--format=%H %P%x00%s%x00%b%x01", branch)
     found = []
     for record in log.split("\x01"):
         if not record.strip():
@@ -64,7 +65,11 @@ def changes(repo: Path, branch: str, limit: int) -> List[Change]:
         sha, *parents = ids.split()
         if not parents:
             continue  # the root commit has nothing to compare against
+        if subject.startswith(('Revert "', "Reapply \"")) or REVERTS.search(body):
+            continue
         found.append((sha, parents, subject))
+        if len(found) == limit:
+            break
     out = []
     for sha, parents, subject in found:
         base, head = (parents[0], parents[1]) if len(parents) == 2 else (parents[0], sha)
@@ -111,6 +116,9 @@ def _outcomes(path: Optional[Path]) -> Dict[str, str]:
             if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
                 print(f"[calibrate] skipping outcome row {row!r}: the sha must be 7-40 hex characters")
                 continue
+            if outcome not in ("bad", "good"):
+                print(f"[calibrate] skipping outcome row {row!r}: the outcome must be bad or good")
+                continue
             labels[sha] = outcome
     return labels
 
@@ -148,11 +156,18 @@ def report(items: List[Change]) -> str:
     return "\n".join(md) + "\n"
 
 
+def _positive(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="confidence-calibrate", description=__doc__.split("\n\n")[0])
     p.add_argument("--repo", default=".")
     p.add_argument("--branch", default="main")
-    p.add_argument("--limit", type=int, default=20, help="how many recent changes to score (default 20)")
+    p.add_argument("--limit", type=_positive, default=20, help="how many recent changes to score (default 20)")
     p.add_argument("--outcomes", type=Path, help='CSV of "sha,bad|good" rows for outcomes git can\'t see')
     p.add_argument("--out", default="confidence-calibration", help="folder for calibration.md and .csv")
     p.add_argument("--source")
@@ -173,8 +188,9 @@ def main(argv=None) -> int:
         by = _is_reverted(change, reverts)
         if by:
             change.outcome, change.why = "bad", f"reverted by {by[:7]}"
-        label = next((v for k, v in labels.items() if change.sha.startswith(k)), None)
-        if label in ("bad", "good"):
+        # An outcome may name the merge commit or any commit the change brought in.
+        label = next((v for k, v in labels.items() if any(c.startswith(k) for c in change.commits)), None)
+        if label:
             change.outcome, change.why = label, "from --outcomes"
         with tempfile.TemporaryDirectory(prefix="confidence-calibrate-") as out:
             agent_args = ["--repo", str(repo), "--base", change.base, "--head", change.head,
@@ -186,12 +202,17 @@ def main(argv=None) -> int:
                 agent_args += ["--no-memory", "--no-mutation"]
             try:
                 cli.main(agent_args)
-                result = json.loads((Path(out) / "result.json").read_text())
+                result_file = Path(out) / "result.json"
+                if not result_file.exists():
+                    print(f"[calibrate] skipping {change.sha[:7]}: it changes nothing to score")
+                    continue
+                result = json.loads(result_file.read_text())
             except (Exception, SystemExit) as exc:  # one change that can't be scored shouldn't stop the run
                 print(f"[calibrate] could not score {change.sha[:7]}: {exc}")
                 continue
         change.score, change.band = result["score"], result["band"]
-        change.signals = sorted({d["signal"] for d in result["deductions"]})
+        # Group by the kind of deduction (the same keys as the weights), not the display name.
+        change.signals = sorted({d.get("key") or d["signal"] for d in result["deductions"]})
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "calibration.md").write_text(report(items), encoding="utf-8")

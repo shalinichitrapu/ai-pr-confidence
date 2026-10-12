@@ -16,5 +16,5 @@ git fetch -q origin "$BASE" "$HEAD_BRANCH"
 python -m confidence_agent \
   --base "origin/$BASE" \
   --head "origin/$HEAD_BRANCH" \
-  --source studybuddy \
+  --source studybuddy,confidence_agent \
   --post-to-pr "$PR"

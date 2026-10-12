@@ -30,6 +30,9 @@ open_pr fix/normalize-quiz-answers \
 open_pr refactor/planner-rounding \
   "Make study plan minutes add up exactly" \
   "AI-generated: distributes leftover minutes so each day totals minutes_per_day."
+open_pr refactor/planner-per-day \
+  "Build each day of the study plan separately" \
+  "AI-generated: computes each day's plan in its own pass to allow per-day adjustments later."
 
 echo
 echo "Done. The 'AI change confidence' check will comment on each PR in a minute or two:"

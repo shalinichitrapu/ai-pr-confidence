@@ -53,10 +53,9 @@ def test_reverted_merge_is_marked_bad_and_scored(tmp_path):
     assert by_subject["Merge bad"].split(",")[5] == "bad"
     assert by_subject["Merge good"].split(",")[5] == "good"
     assert ",100,High," in by_subject["Merge good"]
-    assert "Coverage" in by_subject["Merge bad"]  # h() is untested
+    assert ",coverage," in by_subject["Merge bad"]  # h() is untested; grouped by deduction key
     md = (out / "calibration.md").read_text()
-    # The revert commit is itself a direct commit on main, so it's scored too.
-    assert "3 changes scored, 1 later reverted or marked bad (33%)" in md
+    assert "2 changes scored, 1 later reverted or marked bad (50%)" in md  # the revert itself isn't a change
 
 
 def test_squash_merged_history_uses_each_commit(tmp_path):
@@ -116,3 +115,44 @@ def test_bad_outcome_rows_are_skipped(tmp_path):
     rows = tmp_path / "o.csv"
     rows.write_text(",bad\nab,bad\nABCDEF1234,Bad\nnot-a-sha,good\n")
     assert calibrate._outcomes(rows) == {"abcdef1234": "bad"}
+
+
+def test_revert_and_reapply_commits_arent_changes(tmp_path):
+    repo = project(tmp_path)
+    write(repo, {"x.md": "x\n"})
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "feature X")
+    git(repo, "revert", "--no-edit", "HEAD")
+    git(repo, "revert", "--no-edit", "HEAD")  # git names this 'Reapply "feature X"'
+    found = calibrate.changes(repo, "main", 10)
+    assert [c.subject for c in found] == ["feature X"]
+
+
+def test_limit_counts_scored_changes_and_must_be_positive(tmp_path, capsys):
+    import pytest as _pytest
+    repo = project(tmp_path)
+    write(repo, {"a.md": "a\n"})
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "only change")
+    assert [c.subject for c in calibrate.changes(repo, "main", 1)] == ["only change"]
+    for bad in ("0", "-1"):
+        with _pytest.raises(SystemExit):
+            calibrate.parse_args(["--limit", bad])
+
+
+def test_outcome_rows_must_say_bad_or_good_and_can_name_any_commit(tmp_path):
+    rows = tmp_path / "o.csv"
+    rows.write_text("abcdef1234,incident\n")
+    assert calibrate._outcomes(rows) == {}
+    repo = project(tmp_path)
+    git(repo, "checkout", "-q", "-b", "y", "main")
+    write(repo, {"y.md": "y\n"})
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "y work")
+    pr_commit = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "y", "-m", "Merge y")
+    rows.write_text(f"{pr_commit[:9]},bad\n")
+    out = tmp_path / "out"
+    calibrate.main(["--repo", str(repo), "--outcomes", str(rows), "--out", str(out)])
+    assert ",bad,from --outcomes" in (out / "calibration.csv").read_text()
