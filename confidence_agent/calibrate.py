@@ -65,7 +65,9 @@ def changes(repo: Path, branch: str, limit: int) -> List[Change]:
         sha, *parents = ids.split()
         if not parents:
             continue  # the root commit has nothing to compare against
-        if subject.startswith(('Revert "', "Reapply \"")) or REVERTS.search(body):
+        # A revert commit says so in its subject, or its body starts with git's line.
+        # A squash-merged PR whose body merely lists an internal revert is a real change.
+        if subject.startswith(('Revert "', "Reapply \"")) or body.lstrip().startswith("This reverts commit"):
             continue
         found.append((sha, parents, subject))
         if len(found) == limit:

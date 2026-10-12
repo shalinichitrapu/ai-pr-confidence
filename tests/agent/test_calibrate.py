@@ -156,3 +156,12 @@ def test_outcome_rows_must_say_bad_or_good_and_can_name_any_commit(tmp_path):
     out = tmp_path / "out"
     calibrate.main(["--repo", str(repo), "--outcomes", str(rows), "--out", str(out)])
     assert ",bad,from --outcomes" in (out / "calibration.csv").read_text()
+
+
+def test_squash_commit_listing_an_internal_revert_is_still_a_change(tmp_path):
+    repo = project(tmp_path)
+    write(repo, {"y.md": "y\n"})
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "Add feature Y (#12)", "-m",
+        '* wip\n\n* Revert "wip"\n\nThis reverts commit 1234567890abcdef1234567890abcdef12345678.\n\n* finish')
+    assert [c.subject for c in calibrate.changes(repo, "main", 10)] == ["Add feature Y (#12)"]
