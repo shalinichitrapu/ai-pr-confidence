@@ -133,15 +133,69 @@ def test_settings_come_from_the_base_commit_not_the_pull_request(tmp_path):
     assert any(d["signal"] == "Coverage" for d in result["deductions"])
 
 
-def test_a_broken_config_at_the_base_stops_the_run(tmp_path):
+def config_repo(tmp_path, base_toml, change_toml=None, base_extra=None):
+    """main has base_toml; branch "change" adds untested code (and optionally new settings)."""
     repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "pyproject.toml").write_text("[tool.confidence]\nsorce = 'x'\n")
+    (repo / "tests").mkdir(parents=True)
+    (repo / "app.py").write_text("def f():\n    return 1\n")
+    (repo / "tests" / "test_app.py").write_text("from app import f\n\ndef test_f():\n    assert f() == 1\n")
+    (repo / "pyproject.toml").write_text(base_toml)
     git(repo, "init", "-q", "-b", "main")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "base")
-    (repo / "a.py").write_text("x = 1\n")
     git(repo, "checkout", "-qb", "change")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "change")
-    assert cli.main(["--repo", str(repo), "--base", "main", "--head", "change", "--no-llm"]) == 2
+    (repo / "app.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n")
+    if change_toml is not None:
+        (repo / "pyproject.toml").write_text(change_toml)
+    git(repo, "commit", "-qam", "change")
+    if base_extra is not None:
+        git(repo, "checkout", "-q", "main")
+        (repo / "pyproject.toml").write_text(base_extra)
+        git(repo, "commit", "-qam", "tighten settings")
+    return repo
+
+
+def run_cli(repo, out):
+    code = cli.main(["--repo", str(repo), "--base", "main", "--head", "change", "--no-llm", "--no-memory",
+                     "--out", str(out)])
+    return code, (out / "report.md").read_text()
+
+
+def test_settings_come_from_the_tip_of_the_base_branch(tmp_path):
+    # The change started from a commit with min_score 0; main has since raised it to 90.
+    repo = config_repo(tmp_path, '[tool.confidence]\nsource = "app"\nmin_score = 0\n',
+                       base_extra='[tool.confidence]\nsource = "app"\nmin_score = 90\n')
+    code, _ = run_cli(repo, tmp_path / "out")
+    assert code == 1
+
+
+def test_a_mistake_in_the_changes_own_settings_fails_the_run(tmp_path):
+    repo = config_repo(tmp_path, '[tool.confidence]\nsource = "app"\n',
+                       change_toml='[tool.confidence]\nsource = "app"\nmin_scor = 60\n')
+    code, report = run_cli(repo, tmp_path / "out")
+    assert code == 2
+    assert "This change's [tool.confidence] has a mistake" in report and "min_scor" in report
+
+
+def test_a_mistake_on_the_base_branch_warns_and_uses_defaults(tmp_path):
+    # The change fixes the typo; it must still be scored rather than blocked.
+    repo = config_repo(tmp_path, "[tool.confidence]\nsorce = 'x'\n", change_toml='[tool.confidence]\nsource = "."\n')
+    code, report = run_cli(repo, tmp_path / "out")
+    assert code == 0
+    assert "has a mistake, so defaults were used" in report
+
+
+@pytest.mark.parametrize("text", [
+    "[tool.confidence]\nbands = 5\n",
+    "[tool.confidence]\nweights = [1]\n",
+    "[tool]\nconfidence = 1\n",
+    "tool = 1\n",
+])
+def test_values_of_the_wrong_kind_are_config_errors(text):
+    with pytest.raises(ConfigError, match="must be a table"):
+        parse(text)
+
+
+def test_ignore_example_matches_top_level_folders():
+    cfg = parse('[tool.confidence]\nignore = ["*migrations/*"]\n')
+    assert cfg.ignored("migrations/0001.py") and cfg.ignored("app/migrations/0001.py")

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 import statistics
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
 from .expectations import expects_exception, node_file
 from .gitutil import Diff
-from .swallow import silent_excepts
+from .swallow import new_silent_excepts
 from .runner import RunResult
 
 # Thresholds (how much slower, how much a metric or memory must grow) come from
@@ -255,11 +256,12 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         s.mutants_tested = head.mutation.killed + len(head.mutation.survived)
         s.mutants_survived = list(head.mutation.survived)
     s.hidden_code = _hidden_code(diff, tests_path)
+    removed = Counter(line.strip() for lines in diff.removed_text.values() for line in lines if line.strip())
     silenced = [
-        f"{path}:{line}: {diff.head_source[path].splitlines()[line - 1].strip()}"
-        for path, text in diff.head_source.items()
+        finding
+        for path, text in sorted(diff.head_source.items())
         if not _is_test_file(path, tests_path)
-        for line in silent_excepts(text, diff.added_lines.get(path, ()))
+        for finding in new_silent_excepts(path, text, diff.added_lines.get(path, ()), removed)
     ]
     if silenced:
         s.hidden_code["errors silenced without a trace"] = silenced
@@ -343,6 +345,11 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     for found in (s.new_error_logs, s.new_span_exceptions, s.new_test_error_logs, s.new_test_span_exceptions):
         for sig in [k for k in found if cfg.expected(k)]:
             s.expected_errors[sig] = s.expected_errors.get(sig, 0) + found.pop(sig)
+    # An error already scored at full weight for an existing test isn't counted
+    # again at half weight because a new test hits it too.
+    for scored, half in ((s.new_error_logs, s.new_test_error_logs), (s.new_span_exceptions, s.new_test_span_exceptions)):
+        for sig in [k for k in half if k in scored]:
+            scored[sig] += half.pop(sig)
 
     base_lat, head_lat = _median_durations(base, in_shared), _median_durations(head, in_shared)
     for name, after in head_lat.items():
