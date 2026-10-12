@@ -140,7 +140,7 @@ optional; command-line flags win over the file.
 source = "my_package"          # default for --source
 tests = "tests"                # default for --tests
 min_score = 60                 # default for --min-score
-ignore = ["*/migrations/*", "*_pb2.py"]               # changed files that are never scored
+ignore = ["*migrations/*", "*_pb2.py"]                # changed files that are never scored (glob; * also matches /)
 expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures shown but not scored
 
 [tool.confidence.bands]
@@ -174,10 +174,14 @@ The values above are the defaults. An error signature is the text after "New
 ERROR logs" or "New exceptions on spans" in a report; `expected_errors` matches
 any part of it.
 
-**Settings are read from the base commit, not the pull request.** A pull request
-that changes `[tool.confidence]` is scored with the old settings, so it can't
-loosen its own checks. Its new settings apply once it's merged. A mistake in the
-table (an unknown key or a wrong type) stops the run with a message saying where.
+**Settings are read from the tip of the base branch, not the pull request.** A pull
+request that changes `[tool.confidence]` is scored with the current settings on
+`--base`, so it can't loosen its own checks, even if it started from an older
+commit. Its new settings apply once it's merged. The pull request's own table is
+still checked: a mistake in it (an unknown key or a wrong type) makes the run fail
+with a message saying where, so it can't be merged. If the base branch's table has
+a mistake, the run warns and uses the defaults instead of blocking every pull
+request, including the one that fixes it.
 
 ## Add it to your GitHub pull requests
 

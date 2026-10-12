@@ -48,12 +48,22 @@ def main(argv=None) -> int:
         return 0
 
     print(f"[confidence] base {base_sha[:7]}  head {head_sha[:7]}")
-    # Settings come from the base commit, so a pull request can't loosen its own checks.
+    # Settings come from the tip of the base branch (not the possibly older commit
+    # this change started from), so a pull request can't loosen its own checks.
+    config_warnings, config_broken = [], False
     try:
-        cfg = config.parse(gitutil.read_file(repo, base_sha, "pyproject.toml") or "")
+        cfg = config.parse(gitutil.read_file(repo, gitutil.resolve(repo, args.base), "pyproject.toml") or "")
     except config.ConfigError as exc:
-        print(f"[confidence] error in [tool.confidence] at the base commit: {exc}")
-        return 2
+        # Don't block every pull request (including the one fixing it) on a broken base.
+        cfg = config.Config()
+        config_warnings.append(f"[tool.confidence] on {args.base} has a mistake, so defaults were used: {exc}")
+    try:
+        config.parse(gitutil.read_file(repo, head_sha, "pyproject.toml") or "")
+    except config.ConfigError as exc:
+        config_broken = True
+        config_warnings.append(f"This change's [tool.confidence] has a mistake; fix it before merging: {exc}")
+    for warning in config_warnings:
+        print(f"[confidence] WARNING: {warning}")
     args.source = args.source or cfg.source or "."
     args.tests = args.tests or cfg.tests or "tests"
     args.min_score = args.min_score if args.min_score is not None else (cfg.min_score or 0)
@@ -78,6 +88,7 @@ def main(argv=None) -> int:
         print("[confidence] no test results from head run. pytest output:\n" + runs["head"].output_tail)
 
     sig = signals.compute(runs["base"], runs["head"], diff, args.tests, args.source, cfg)
+    sig.warnings.extend(config_warnings)
     for warning in sig.warnings:
         print(f"[confidence] WARNING: {warning}")
     result = scoring.score(sig, cfg)
@@ -108,6 +119,8 @@ def main(argv=None) -> int:
         from .github import post_comment
         print(f"[confidence] PR #{args.post_to_pr}: comment {post_comment(repo, args.post_to_pr, md)}")
 
+    if config_broken:
+        return 2
     return 1 if result.value < args.min_score else 0
 
 
