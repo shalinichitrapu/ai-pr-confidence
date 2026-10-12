@@ -10,17 +10,20 @@ notice when it's wrong.
 from __future__ import annotations
 
 import ast
-import importlib.util
 import io
 import os
+import re
 import subprocess
 import sys
+import shutil
 import tempfile
 import time
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+from .runner import SECRET_ENV, optional_flags, run_pytest
 
 SWAPS = {
     "<": "<=", "<=": "<", ">": ">=", ">=": ">", "==": "!=", "!=": "==",
@@ -70,7 +73,8 @@ def telemetry_lines(source: str) -> set:
         # log, logger, app_log, audit_log, LOGGER, logging, logging.getLogger(__name__)
         logger_like = (last in ("log", "logging") or last.endswith(("_log", "logger"))
                        or last.startswith("getlogger("))
-        if ((method in LOG_CALLS and logger_like) or method in SPAN_CALLS
+        span_like = "span" in last
+        if ((method in LOG_CALLS and logger_like) or (method in SPAN_CALLS and (span_like or method != "set_status"))
                 or (method in INSTRUMENT_CALLS and receiver in instruments)):
             lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
     return lines
@@ -85,7 +89,7 @@ class Mutant:
     replacement: str
 
     def describe(self) -> str:
-        return f"{self.path}:{self.line}: `{self.original}` → `{self.replacement}`"
+        return f"{self.path}:{self.line}: {self.original} → {self.replacement}"
 
 
 @dataclass
@@ -97,21 +101,55 @@ class MutationResult:
     note: str = ""  # why mutation testing didn't run or couldn't conclude, for the report
 
 
+def _inert_spans(source: str) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
+    """Source ranges where an edit can't change behavior: type annotations."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    spans = []
+
+    def add(node):
+        if node is not None and hasattr(node, "lineno"):
+            spans.append(((node.lineno, node.col_offset), (node.end_lineno, node.end_col_offset)))
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            add(node.returns)
+            args = node.args
+            for a in (*getattr(args, "posonlyargs", []), *args.args, *args.kwonlyargs, args.vararg, args.kwarg):
+                if a is not None:
+                    add(a.annotation)
+        elif isinstance(node, ast.AnnAssign):
+            add(node.annotation)
+    return spans
+
+
+def _inside(spans, row: int, col: int) -> bool:
+    return any(start <= (row, col) < end for start, end in spans)
+
+
 def mutants_for_line(source: str, path: str, line: int) -> List[Mutant]:
-    """Every single-token mutation of one line that still compiles."""
+    """Every single-token mutation of one line that still compiles and can change behavior."""
     found = []
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return []
-    for tok in tokens:
-        if tok.start[0] != line or tok.end[0] != line:
+    inert = _inert_spans(source)
+    for i, tok in enumerate(tokens):
+        if tok.start[0] != line or tok.end[0] != line or _inside(inert, *tok.start):
             continue
+        following = tokens[i + 1].string if i + 1 < len(tokens) else ""
+        if tok.string in ("*", "/") and following in (",", ")"):
+            continue  # a bare `*` or `/` in a parameter list is a marker, not arithmetic
         replacement = None
         if tok.type in (tokenize.OP, tokenize.NAME) and tok.string in SWAPS:
             replacement = SWAPS[tok.string]
         elif tok.type == tokenize.NUMBER and tok.string.isdigit():
             replacement = str(int(tok.string) + 1)
+        elif tok.type == tokenize.NUMBER and re.fullmatch(r"\d*\.\d+|\d+\.\d*", tok.string):
+            replacement = repr(float(tok.string) + 1)
         if replacement is None:
             continue
         mutant = Mutant(path, line, tok.start[1], tok.string, replacement)
@@ -146,16 +184,16 @@ def choose(candidates: Dict[Tuple[str, int], List[Mutant]], limit: int) -> List[
     return chosen
 
 
-def _run(workdir: Path, node_ids: List[str], env: Dict[str, str], timeout: float) -> Optional[bool]:
-    """True if a test failed (mutant killed), False if all passed, None if it couldn't run."""
-    cmd = [sys.executable, "-m", "pytest", *node_ids, "-x", "-q", "-p", "no:cacheprovider",
-           "-p", "no:randomly", "-p", "no:random_order"]
-    if importlib.util.find_spec("xdist") is not None:
-        cmd += ["-n", "0"]
+TIMEOUT = "timeout"
+
+
+def _run(workdir: Path, node_ids: List[str], env: Dict[str, str], timeout: float):
+    """True if a test failed, False if all passed, TIMEOUT, or None if it couldn't run."""
+    cmd = [sys.executable, "-m", "pytest", *node_ids, "-x", "-q", "-o", f"cache_dir={env['CONFIDENCE_SCRATCH']}"]
     try:
-        proc = subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True, timeout=timeout)
+        proc = run_pytest(cmd, optional_flags(), cwd=workdir, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return True  # the mutant made the tests hang, which they noticed
+        return TIMEOUT
     if proc.returncode == 0:
         return False
     if proc.returncode == 1:
@@ -193,12 +231,19 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
     durations = durations or {}
     candidates: Dict[Tuple[str, int], List[Mutant]] = {}
     sources: Dict[str, str] = {}
+    originals: Dict[str, bytes] = {}
+    encodings: Dict[str, str] = {}
     unusable = False
     for path, nums in lines.items():
         file = workdir / path
         if not file.is_file():
             continue
-        sources[path] = file.read_text()
+        originals[path] = file.read_bytes()
+        encodings[path] = tokenize.detect_encoding(io.BytesIO(originals[path]).readline)[0]
+        try:
+            sources[path] = originals[path].decode(encodings[path])
+        except (UnicodeDecodeError, LookupError):
+            continue
         skip = telemetry_lines(sources[path])
         for line in nums:
             if line in skip:
@@ -219,37 +264,59 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
                            "aren't recorded as pytest test ids (does your coverage config set dynamic_context?)")
         return result
 
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (*import_paths, env.get("PYTHONPATH", "")) if p)
+    env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (*import_paths, os.environ.get("PYTHONPATH", "")) if p)
     env.pop("PYTEST_ADDOPTS", None)
-    started = time.monotonic()
-    for i, mutant in enumerate(chosen):
-        left = total_budget - (time.monotonic() - started)
-        if i and left <= 0:  # always try at least one
-            result.note = (f"stopped after {i} of {len(chosen)} mutants: the {total_budget:g}s mutation "
-                           "budget ran out (mutation_budget_s)")
-            break
-        file = workdir / mutant.path
-        tests = _test_ids(contexts[mutant.path][str(mutant.line)], failing)
-        budget = max(timeout, 5 * sum(durations.get(t, 0.0) for t in tests) + 10)
-        if i:
-            budget = min(budget, left)  # the overall budget is a hard limit after the first mutant
-        with tempfile.TemporaryDirectory(prefix="confidence-pyc-") as pyc:
-            # A fresh bytecode cache: same-size edits made within one second could
-            # otherwise reuse the cached, unmutated bytecode.
-            env["PYTHONPYCACHEPREFIX"] = pyc
-            try:
-                file.write_text(apply(sources[mutant.path], mutant))
-                killed = _run(workdir, tests, env, budget)
-            finally:
-                file.write_text(sources[mutant.path])
-        result.tried += 1
-        if killed is None:
-            result.skipped += 1
-        elif killed:
-            result.killed += 1
-        else:
-            result.survived.append(mutant.describe())
+    scratch = tempfile.mkdtemp(prefix="confidence-mutate-")
+    env["CONFIDENCE_SCRATCH"] = scratch
+    clean: Dict[Tuple[str, ...], bool] = {}  # covering test set -> passes without any mutant
+    try:
+        started = time.monotonic()
+        for i, mutant in enumerate(chosen):
+            left = total_budget - (time.monotonic() - started)
+            if i and left <= 0:  # always try at least one
+                result.note = (f"stopped after {i} of {len(chosen)} mutants: the {total_budget:g}s mutation "
+                               "budget ran out (mutation_budget_s)")
+                break
+            file = workdir / mutant.path
+            tests = _test_ids(contexts[mutant.path][str(mutant.line)], failing)
+            normal = max(timeout, 5 * sum(durations.get(t, 0.0) for t in tests) + 10)
+            budget = min(normal, left) if i else normal  # the overall budget is a hard limit after the first
+            key = tuple(tests)
+            if key not in clean:
+                # These tests passed in the full run, but may depend on another test
+                # having run first. Run them alone, unmutated, once: if they fail
+                # here, they'd "catch" every mutant for the wrong reason.
+                with tempfile.TemporaryDirectory(prefix="confidence-pyc-") as pyc:
+                    env["PYTHONPYCACHEPREFIX"] = pyc
+                    clean[key] = _run(workdir, tests, env, budget) is False
+                if i:  # the pre-check spent some of the overall budget
+                    budget = min(normal, total_budget - (time.monotonic() - started))
+            if not clean[key] or budget <= 0:
+                result.tried += 1
+                result.skipped += 1
+                continue
+            with tempfile.TemporaryDirectory(prefix="confidence-pyc-") as pyc:
+                # A fresh bytecode cache: same-size edits made within one second could
+                # otherwise reuse the cached, unmutated bytecode.
+                env["PYTHONPYCACHEPREFIX"] = pyc
+                try:
+                    file.write_bytes(apply(sources[mutant.path], mutant).encode(encodings[mutant.path]))
+                    killed = _run(workdir, tests, env, budget)
+                finally:
+                    file.write_bytes(originals[mutant.path])  # byte for byte, line endings included
+            if killed == TIMEOUT:
+                # A hang the tests noticed, unless it was the overall budget that cut the run short.
+                killed = None if budget < normal else True
+            result.tried += 1
+            if killed is None:
+                result.skipped += 1
+            elif killed:
+                result.killed += 1
+            else:
+                result.survived.append(mutant.describe())
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     if result.tried and result.skipped == result.tried:
         none = f"none of the {result.tried} mutants could be tested (the covering tests didn't run cleanly)"
         result.note = f"{result.note}; {none}" if result.note else none

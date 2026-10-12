@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import re
 import subprocess
+import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -12,9 +14,43 @@ from typing import Dict, List, Optional, Set, Tuple
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
         # quotePath=false: print non-ASCII file names as-is instead of quoted escapes.
+        # errors="replace": a diff of a file that isn't UTF-8 mustn't crash the run.
         ["git", "-C", str(repo), "-c", "core.quotePath=false", *args],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
     ).stdout
+
+
+def _decode_source(data: bytes, path: str) -> str:
+    """Python files honour their coding declaration; anything else is UTF-8, best effort."""
+    if path.endswith(".py"):
+        try:
+            encoding = tokenize.detect_encoding(io.BytesIO(data).readline)[0]
+            return data.decode(encoding)
+        except (SyntaxError, LookupError, UnicodeDecodeError):
+            pass
+    return data.decode("utf-8", errors="replace")
+
+
+def _unquote(path: str) -> str:
+    """Undo git's C-style quoting of unusual file names ("we\"ird.py")."""
+    if not (len(path) >= 2 and path[0] == path[-1] == '"'):
+        return path
+    simple = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+    out, text, i = bytearray(), path[1:-1], 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            if text[i + 1] in simple:
+                out.append(simple[text[i + 1]])
+                i += 2
+                continue
+            if text[i + 1:i + 4].isdigit():  # \303\251: the UTF-8 bytes of a non-ASCII name
+                out.append(int(text[i + 1:i + 4], 8))
+                i += 4
+                continue
+        out += c.encode("utf-8")  # with core.quotePath=false, non-ASCII arrives as-is
+        i += 1
+    return out.decode("utf-8", "replace")
 
 
 def resolve(repo: Path, ref: str) -> str:
@@ -23,10 +59,8 @@ def resolve(repo: Path, ref: str) -> str:
 
 def read_file(repo: Path, commit: str, path: str) -> Optional[str]:
     """A file's contents at a commit, or None if it doesn't exist there."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{commit}:{path}"], capture_output=True, text=True
-    )
-    return proc.stdout if proc.returncode == 0 else None
+    proc = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{path}"], capture_output=True)
+    return _decode_source(proc.stdout, path) if proc.returncode == 0 else None
 
 
 def merge_base(repo: Path, base: str, head: str) -> str:
@@ -55,6 +89,7 @@ class Diff:
     added_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> added lines
     head_source: Dict[str, str] = field(default_factory=dict)  # changed .py file -> its text at head
     dependency_changes: List[str] = field(default_factory=list)  # "path: added pkg >=1" etc.
+    pytest_config_changes: List[str] = field(default_factory=list)  # "pyproject.toml: addopts" etc.
     removed_lines: Dict[str, Set[int]] = field(default_factory=dict)  # old path -> base line numbers removed
     base_source: Dict[str, str] = field(default_factory=dict)  # .py file with removals -> its text at base
     removed_text: Dict[str, List[str]] = field(default_factory=dict)  # path -> removed lines
@@ -103,17 +138,22 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
 
     current = old = None
     in_header = False
-    for line in git(repo, "diff", "--unified=0", "--no-color", base, head).splitlines():
+    # Fixed prefixes and no external diff tool, whatever the user's git config says
+    # (diff.noprefix, diff.external, color). Split on "\n" only: str.splitlines
+    # would also break lines at form feeds and other separators inside them.
+    patch = git(repo, "diff", "--unified=0", "--no-color", "--no-ext-diff",
+                "--src-prefix=a/", "--dst-prefix=b/", base, head)
+    for line in patch.split("\n"):
         if line.startswith("diff --git "):
             in_header, current, old = True, None, None
             continue
         # git appends a tab after file names with spaces
         if in_header and line.startswith("--- "):
-            source = line[4:].rstrip("\t")
+            source = _unquote(line[4:].rstrip("\t"))
             old = source[2:] if source.startswith("a/") else None
             continue
         if in_header and line.startswith("+++ "):
-            target = line[4:].rstrip("\t")
+            target = _unquote(line[4:].rstrip("\t"))
             current = target[2:] if target.startswith("b/") else None
             if current:
                 diff.added_lines.setdefault(current, set())
@@ -142,12 +182,20 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
             text = read_file(repo, head, path)
             if text is not None:
                 diff.head_source[path] = text
-    from .review_scope import all_dependency_changes, is_dependency_file
+    from .review_scope import all_dependency_changes, is_dependency_file, pytest_settings
+    for path in diff.files_changed:
+        before = pytest_settings(path, read_file(repo, base, diff.renamed.get(path, path)) or "")
+        after = pytest_settings(path, read_file(repo, head, path) or "")
+        if before is not None and before != after:
+            keys = sorted(k for k in set(before) | set(after or {}) if before.get(k) != (after or {}).get(k))
+            diff.pytest_config_changes.append(f"{path}: {', '.join(keys)}")
     diff.dependency_changes = all_dependency_changes(
         (path, read_file(repo, base, diff.renamed.get(path, path)), read_file(repo, head, path))
         for path in diff.files_changed if is_dependency_file(path)
     )
-    for path in diff.removed_lines:
+    # Every changed Python file's base version (not only ones with removed lines):
+    # comparing a test's code before and after needs it even for add-only edits.
+    for path in {*diff.removed_lines, *(diff.renamed.get(p, p) for p in diff.added_lines)}:
         if path.endswith(".py"):
             text = read_file(repo, base, path)
             if text is not None:

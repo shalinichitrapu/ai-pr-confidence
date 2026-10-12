@@ -158,7 +158,8 @@ def config_repo(tmp_path, base_toml, change_toml=None, base_extra=None):
 def run_cli(repo, out):
     code = cli.main(["--repo", str(repo), "--base", "main", "--head", "change", "--no-llm", "--no-memory",
                      "--out", str(out)])
-    return code, (out / "report.md").read_text()
+    # Rendered text: the report escapes Markdown in warnings (\\[tool.confidence\\]).
+    return code, re.sub(r"\\(.)", r"\1", (out / "report.md").read_text())
 
 
 def test_settings_come_from_the_tip_of_the_base_branch(tmp_path):
@@ -215,3 +216,43 @@ def test_an_already_invalid_pyproject_doesnt_fail_an_unrelated_change():
     from confidence_agent.config import raw_table
     assert raw_table("[broken\nname = 1\n") is raw_table("[broken\nname = 2\n")
     assert raw_table("[tool.confidence]\nsource = 'a'\n") != raw_table("[broken\n")
+
+
+
+@pytest.mark.parametrize("text, message", [
+    ("[tool.confidence.bands]\nhigh = 50\nmedium = 101\n", "0 <= medium <= high <= 100"),
+    ("[tool.confidence.thresholds]\nmetric_ratio = 0\n", "metric_ratio must be at least 1"),
+    ("[tool.confidence.thresholds]\nlatency_ratio = -1\n", "latency_ratio must be at least 1"),
+    ("[tool.confidence.thresholds]\nlarge_diff_lines = -5\n", "large_diff_lines can't be negative"),
+    ("[tool.confidence.thresholds]\nmax_mutants = 2.5\n", "max_mutants must be a whole number"),
+    ("[tool.confidence.weights]\nerror_logs = [30, 0, 10]\n", "can't be more than the maximum"),
+    ("[tool.confidence]\nexpected_errors = [\"\"]\n", "can't be empty"),
+])
+def test_settings_that_would_break_the_readmes_guarantees_are_rejected(text, message):
+    with pytest.raises(ConfigError, match=re.escape(message)):
+        parse(text)
+
+
+def test_small_test_failure_weights_still_score_low():
+    from confidence_agent.scoring import score
+    from confidence_agent.signals import Signals
+    s = Signals(tests_total=2, tests_newly_failing=["t"])
+    low = score(s, parse("[tool.confidence.weights]\ntests_failing = [10, 0, 10]\n"))
+    assert low.value == 59 and low.band == "Low"  # clamped just below medium
+    off = score(s, parse("[tool.confidence.weights]\ntests_failing = [0, 0, 0]\n"))
+    assert off.value == 100  # a 0 maximum turns the check off, as for every other weight
+    assert parse("[tool.confidence.bands]\nhigh = 0\nmedium = 0\n").bands.medium == 0
+
+
+@pytest.mark.parametrize("text", [
+    "[tool.confidence.thresholds]\nlatency_ratio = 1\nmetric_ratio = 1\nmemory_ratio = 1\n",
+    "[tool.confidence.thresholds]\nlatency_min_delta_ms = 0\nmetric_min_delta = 0\nlarge_diff_lines = 0\n",
+    "[tool.confidence.thresholds]\nmax_mutants = 0\nmutant_timeout_s = 0.5\n",
+])
+def test_boundary_settings_are_accepted(text):
+    parse(text)  # exactly 1x, a 0 delta and 0 mutants are all valid
+
+
+def test_a_zero_timeout_is_rejected():
+    with pytest.raises(ConfigError, match="mutation_budget_s must be more than 0"):
+        parse("[tool.confidence.thresholds]\nmutation_budget_s = 0\n")

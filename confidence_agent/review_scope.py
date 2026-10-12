@@ -7,6 +7,7 @@ eval(), or an edited CI file. These checks read the diff instead.
 from __future__ import annotations
 
 import ast
+import configparser
 import re
 import sys
 from fnmatch import fnmatch
@@ -90,32 +91,129 @@ def _poetry(table, section: str) -> Deps:
     return deps
 
 
+def _at(doc, *keys) -> dict:
+    """doc[k1][k2]..., or {} if any step is missing or isn't a table (`tool = 3`)."""
+    for key in keys:
+        doc = doc.get(key) if isinstance(doc, dict) else None
+    return doc if isinstance(doc, dict) else {}
+
+
+def _strs(value) -> str:
+    return "\n".join(v for v in value if isinstance(v, str)) if isinstance(value, list) else ""
+
+
 def _pyproject(text: str) -> Deps:
     try:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return {}
-    project = doc.get("project", {})
-    deps = _requirements("\n".join(project.get("dependencies", [])), "[project] dependencies")
-    for extra, lines in project.get("optional-dependencies", {}).items():
-        deps.update(_requirements("\n".join(lines), f"optional-dependencies.{extra}"))
-    for group, items in doc.get("dependency-groups", {}).items():  # PEP 735
-        deps.update(_requirements("\n".join(i for i in items if isinstance(i, str)), f"dependency-groups.{group}"))
-    deps.update(_requirements("\n".join(doc.get("build-system", {}).get("requires", [])), "build-system"))
-    poetry = doc.get("tool", {}).get("poetry", {})
+    project = _at(doc, "project")
+    deps = _requirements(_strs(project.get("dependencies")), "[project] dependencies")
+    for extra, lines in _at(project, "optional-dependencies").items():
+        deps.update(_requirements(_strs(lines), f"optional-dependencies.{extra}"))
+    for group, items in _at(doc, "dependency-groups").items():  # PEP 735
+        deps.update(_requirements(_strs(items), f"dependency-groups.{group}"))
+    deps.update(_requirements(_strs(_at(doc, "build-system").get("requires")), "build-system"))
+    poetry = _at(doc, "tool", "poetry")
     deps.update(_poetry(poetry.get("dependencies"), "poetry"))
     deps.update(_poetry(poetry.get("dev-dependencies"), "poetry dev"))
-    for group, table in poetry.get("group", {}).items():
-        deps.update(_poetry(table.get("dependencies"), f"poetry group {group}"))
+    for group, table in _at(poetry, "group").items():
+        deps.update(_poetry(_at(table, "dependencies") or None, f"poetry group {group}"))
+    return deps
+
+
+def _setup_cfg(text: str) -> Deps:
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(text)
+    except configparser.Error:
+        return {}
+    deps: Deps = {}
+    if parser.has_option("options", "install_requires"):
+        deps.update(_requirements(parser.get("options", "install_requires"), "install_requires"))
+    if parser.has_option("options", "setup_requires"):
+        deps.update(_requirements(parser.get("options", "setup_requires"), "setup_requires"))
+    if parser.has_section("options.extras_require"):
+        for extra, lines in parser.items("options.extras_require"):
+            deps.update(_requirements(lines, f"extras_require.{extra}"))
+    return deps
+
+
+def _strings(node) -> List[str]:
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+    return []
+
+
+def _setup_py(text: str) -> Deps:
+    """install_requires / setup_requires / extras_require given as literals to setup()."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return {}
+    deps: Deps = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "setup":
+            for kw in node.keywords:
+                if kw.arg in ("install_requires", "setup_requires"):
+                    deps.update(_requirements("\n".join(_strings(kw.value)), kw.arg))
+                elif kw.arg == "extras_require" and isinstance(kw.value, ast.Dict):
+                    for key, value in zip(kw.value.keys, kw.value.values):
+                        if isinstance(key, ast.Constant):
+                            deps.update(_requirements("\n".join(_strings(value)), f"extras_require.{key.value}"))
     return deps
 
 
 def is_dependency_file(path: str) -> bool:
-    return path.endswith("pyproject.toml") or any(fnmatch(path, p) for p in REQUIREMENTS)
+    name = path.rsplit("/", 1)[-1]
+    return (path.endswith("pyproject.toml") or name in ("setup.py", "setup.cfg")
+            or any(fnmatch(path, p) for p in REQUIREMENTS))
 
 
 def _parse(path: str, text: Optional[str]) -> Deps:
-    return _pyproject(text or "") if path.endswith("pyproject.toml") else _requirements(text or "")
+    name = path.rsplit("/", 1)[-1]
+    if name == "pyproject.toml":
+        return _pyproject(text or "")
+    if name == "setup.cfg":
+        return _setup_cfg(text or "")
+    if name == "setup.py":
+        return _setup_py(text or "")
+    return _requirements(text or "")
+
+
+# Settings that decide which tests run or how failures count. Others (markers,
+# filterwarnings, log_level, timeout, asyncio_mode) don't stop a test running.
+COLLECTION_SETTINGS = {"addopts", "testpaths", "python_files", "python_classes", "python_functions",
+                       "norecursedirs", "confcutdir", "xfail_strict", "rootdir", "required_plugins"}
+
+
+def pytest_settings(path: str, text: str) -> Optional[Dict[str, str]]:
+    """The settings in a config file that decide which tests run, or None if pytest doesn't read it.
+
+    A pull request that changes addopts, testpaths or python_files can stop tests
+    from running without deleting them.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if name == "pyproject.toml":
+        try:
+            doc = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return {"(unparsable)": text}
+        pytest_table = _at(doc, "tool", "pytest")
+        # pytest 9 reads [tool.pytest] directly; older versions [tool.pytest.ini_options].
+        table = {**{k: v for k, v in pytest_table.items() if k != "ini_options"}, **_at(pytest_table, "ini_options")}
+        return {k: repr(v) for k, v in table.items() if k in COLLECTION_SETTINGS}
+    sections = {"pytest.ini": "pytest", "tox.ini": "pytest", "setup.cfg": "tool:pytest"}
+    if name not in sections:
+        return None
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(text)
+    except configparser.Error:
+        return {"(unparsable)": text}
+    if not parser.has_section(sections[name]):
+        return {}
+    return {k: v for k, v in parser.items(sections[name]) if k in COLLECTION_SETTINGS}
 
 
 def all_dependency_changes(files: Iterable[Tuple[str, Optional[str], Optional[str]]]) -> List[str]:
@@ -152,7 +250,13 @@ def dependency_changes(path: str, base_text: Optional[str], head_text: Optional[
 
 # ---------------------------------------------------------------- risky code
 
-SECRET_NAME = re.compile(r"(password|passwd|secret|api_?key|access_?key|token|private_?key)", re.IGNORECASE)
+# The name must *end* in a secret word: API_TOKEN and db_password, not TOKEN_URL or TOKENIZER.
+# The secret word as a whole part of the name (db_password_prod, API_KEY_LIVE), but not
+# a name that only describes one (TOKEN_URL, PASSWORD_RESET_TEMPLATE, TOKENIZER).
+SECRET_NAME = re.compile(r"(?:^|_|(?<=[a-z])(?=[A-Z]))(password|passwd|pwd|secret|api_?key|access_?key|secret_?key"
+                         r"|token|private_?key)\d*(?!_?(url|uri|header|template|name|path|file|dir|type|env|var"
+                         r"|len|length|field|label|prefix|endpoint|timeout|expiry|expires|ttl|count|reset))"
+                         r"(?![a-z])", re.IGNORECASE)
 NOT_A_SECRET = re.compile(r"^(https?://|/)")  # URLs and paths
 ENV_VAR_NAME = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$")  # APP_PASSWORD: the name of a variable, not a value
 KNOWN_SECRET = re.compile(r"^(AKIA|ASIA)[A-Z0-9]{16}$|^(sk|rk)_(live|test)_|^sk-[A-Za-z0-9_-]{20,}|^gh[pousr]_"
@@ -186,6 +290,8 @@ def _aliases(tree: ast.AST) -> Dict[str, str]:
 
 
 def _call_name(node: ast.Call, aliases: Dict[str, str]) -> str:
+    """The dotted name a call resolves to, seeing through aliases,
+    `getattr(os, "system")(...)` and `__import__("pickle").loads(...)`."""
     parts = []
     target = node.func
     while isinstance(target, ast.Attribute):
@@ -193,6 +299,14 @@ def _call_name(node: ast.Call, aliases: Dict[str, str]) -> str:
         target = target.value
     if isinstance(target, ast.Name):
         parts.append(aliases.get(target.id, target.id))
+    elif isinstance(target, ast.Call) and isinstance(target.func, (ast.Name, ast.Attribute)):
+        args = [a.value for a in target.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        func_name = target.func.id if isinstance(target.func, ast.Name) else target.func.attr
+        if func_name in ("__import__", "import_module") and args:
+            parts.append(args[0])
+        elif (func_name == "getattr" and len(target.args) >= 2 and isinstance(target.args[0], ast.Name)
+              and isinstance(target.args[1], ast.Constant)):
+            parts.append(f"{aliases.get(target.args[0].id, target.args[0].id)}.{target.args[1].value}")
     return ".".join(reversed(parts))
 
 
@@ -224,8 +338,10 @@ def _risk(node: ast.AST, aliases: Dict[str, str]) -> Optional[Tuple[str, Set[int
         if name in ("os.system", "os.popen"):
             return f"{name}() runs a shell command", at
         shell = _keyword(node, "shell")
-        if name.startswith("subprocess.") and _is_const(shell, True):
-            return f"{name}(shell=True) runs a shell command", at | {shell.lineno}
+        if name.startswith("subprocess.") and shell is not None and not _is_const(shell, False):
+            if _is_const(shell, True):
+                return f"{name}(shell=True) runs a shell command", at | {shell.lineno}
+            return f"{name}(shell={ast.unparse(shell)}) may run a shell command", at | {shell.lineno}
         verify = _keyword(node, "verify")
         if _is_const(verify, False):
             return f"{name}(verify=False) turns off TLS certificate checks", at | {verify.lineno}
@@ -236,15 +352,19 @@ def _risk(node: ast.AST, aliases: Dict[str, str]) -> Optional[Tuple[str, Set[int
             return f"{name}() is a weak hash", at
         if name == "tempfile.mktemp":
             return "tempfile.mktemp() is open to file races; use mkstemp", at
+    pairs = []  # (name, value node) for assignments, keyword arguments and dict entries
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        value = node.value
-        if (isinstance(value, ast.Constant) and isinstance(value.value, str) and len(value.value) >= 8
-                and " " not in value.value and _looks_like_secret(value.value)):
-            for t in targets:
-                name = t.id if isinstance(t, ast.Name) else getattr(t, "attr", "")
-                if name and SECRET_NAME.search(name):
-                    return f"hard-coded secret in {name}", {node.lineno}
+        pairs = [(t.id if isinstance(t, ast.Name) else getattr(t, "attr", ""), node.value) for t in targets]
+    elif isinstance(node, ast.keyword) and node.arg:
+        pairs = [(node.arg, node.value)]
+    elif isinstance(node, ast.Dict):
+        pairs = [(k.value, v) for k, v in zip(node.keys, node.values)
+                 if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+    for name, value in pairs:
+        if (name and SECRET_NAME.search(name) and isinstance(value, ast.Constant) and isinstance(value.value, str)
+                and len(value.value) >= 8 and " " not in value.value and _looks_like_secret(value.value)):
+            return f"hard-coded secret in {name}", {value.lineno}
     return None
 
 

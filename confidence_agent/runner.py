@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -83,10 +84,77 @@ def _import_paths(workdir: Path) -> List[str]:
 
 
 def junit_id(node_id: str) -> str:
-    """pytest's "tests/test_a.py::TestX::test_f" -> JUnit's "tests.test_a.TestX::test_f"."""
-    path, *rest = node_id.split("::")
+    """pytest's "tests/test_a.py::TestX::test_f[x]" -> JUnit's "tests.test_a.TestX::test_f[x]".
+
+    Parametrize ids may contain "::" themselves, so only the part before "[" is split.
+    """
+    base, bracket, params = node_id.partition("[")
+    path, *rest = base.split("::")
     module = path[:-3].replace("/", ".") if path.endswith(".py") else path
-    return "::".join([".".join([module, *rest[:-1]]), rest[-1]]) if rest else node_id
+    if not rest:
+        return node_id
+    return "::".join([".".join([module, *rest[:-1]]), rest[-1]]) + bracket + params
+
+
+# GitHub credentials the project's tests must not see. In CI the job's token can
+# label and comment on the pull request, and the pull request's own test code
+# could use it, e.g. to acknowledge its own deductions. Other variables (such as
+# a database password integration tests need) are left alone.
+SECRET_ENV = re.compile(r"^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|ACTIONS_RUNTIME_TOKEN"
+                        r"|ACTIONS_ID_TOKEN_REQUEST_TOKEN|ACTIONS_ID_TOKEN_REQUEST_URL|ACTIONS_CACHE_URL"
+                        # Files that set later steps' environment, outputs and the job summary.
+                        r"|GITHUB_ENV|GITHUB_OUTPUT|GITHUB_PATH|GITHUB_STATE|GITHUB_STEP_SUMMARY)$")
+
+# The agent's own coverage settings. The project's (and especially the pull
+# request's) .coveragerc / [tool.coverage] could omit or exclude the code being
+# scored, or turn on parallel mode or dynamic contexts that break collection.
+COVERAGE_RC = """[run]
+parallel = False
+branch = False
+"""
+
+
+def test_env(workdir: Path, extra_paths: List[str] = ()) -> Dict[str, str]:
+    """The environment the project's tests run in: no credentials, this checkout first on the path."""
+    env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (*extra_paths, *_import_paths(workdir), os.environ.get("PYTHONPATH", "")) if p
+    )
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("COVERAGE_RCFILE", None)
+    return env
+
+
+def pytest_flags(scratch: Path) -> List[str]:
+    """Options every pytest run gets. The cache goes to scratch rather than being turned off,
+    so --lf/--ff in the project's addopts still parse (they just find an empty cache)."""
+    return ["-o", f"cache_dir={scratch / 'pytest-cache'}", "--continue-on-collection-errors"]
+
+
+def optional_flags() -> List[str]:
+    """Flags that keep runs comparable but that some setups reject (e.g. -n without xdist loaded)."""
+    flags = list(NO_SHUFFLE)
+    if importlib.util.find_spec("xdist") is not None:
+        # Parallel workers are separate processes that coverage and the plugin don't see.
+        flags += ["-n", "0"]
+    return flags
+
+
+def run_pytest(cmd: List[str], optional: List[str], **kw) -> subprocess.CompletedProcess:
+    """Run pytest with the optional flags; if pytest rejects its arguments (exit 4), retry without them.
+
+    That covers PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 or "-p no:xdist" in the project's
+    config, where "-n 0" is an unknown option.
+    """
+    kw.setdefault("capture_output", True)
+    kw.setdefault("text", True)
+    kw.setdefault("errors", "replace")
+    proc = subprocess.run(cmd + optional, **kw)
+    if proc.returncode == 4 and "-n" in optional:
+        # Only "-n 0" can be unknown; keep the no-shuffle flags so the order stays fixed.
+        i = optional.index("-n")
+        proc = subprocess.run(cmd + optional[:i] + optional[i + 2:], **kw)
+    return proc
 
 
 def rerun_tests(workdir: Path, test_ids: List[str], tests_path: str) -> Dict[str, str]:
@@ -100,69 +168,62 @@ def rerun_tests(workdir: Path, test_ids: List[str], tests_path: str) -> Dict[str
     if not test_ids:
         return {}
     scratch = Path(tempfile.mkdtemp(prefix="confidence-rerun-"))
-    junit = scratch / "junit.xml"
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (*_import_paths(workdir), env.get("PYTHONPATH", "")) if p)
-    env.pop("PYTEST_ADDOPTS", None)
-    cmd = [sys.executable, "-m", "pytest", tests_path, "-q",
-           f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider", *NO_SHUFFLE, *NO_SHUFFLE]
-    if importlib.util.find_spec("xdist") is not None:
-        cmd += ["-n", "0"]
-    subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
-    outcomes, _ = _parse_junit(junit)
-    shutil.rmtree(scratch, ignore_errors=True)
-    return {t: outcomes[t] for t in test_ids if t in outcomes}
+    try:
+        junit = scratch / "junit.xml"
+        cmd = [sys.executable, "-m", "pytest", tests_path, "-q",
+               f"--junitxml={junit}", "-o", "junit_family=xunit2", *pytest_flags(scratch)]
+        run_pytest(cmd, optional_flags(), cwd=workdir, env=test_env(workdir))
+        outcomes, _ = _parse_junit(junit)
+        return {t: outcomes[t] for t in test_ids if t in outcomes}
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_memory: bool = True,
               repo: Path = None) -> RunResult:
     scratch = Path(tempfile.mkdtemp(prefix=f"confidence-{label}-"))
     plugin_dir = _plugin_dir()
-    junit = scratch / "junit.xml"
-    telemetry = scratch / "telemetry.json"
-    cov_json = scratch / "coverage.json"
+    try:
+        junit = scratch / "junit.xml"
+        telemetry = scratch / "telemetry.json"
+        cov_json = scratch / "coverage.json"
+        rcfile = scratch / "coveragerc"
+        rcfile.write_text(COVERAGE_RC)
 
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (str(plugin_dir), *_import_paths(workdir), env.get("PYTHONPATH", "")) if p
-    )
-    env["CONFIDENCE_WORKDIR"] = str(workdir.resolve())
-    if repo is not None:
-        env["CONFIDENCE_REPO"] = str(Path(repo).resolve())
-    env["CONFIDENCE_TELEMETRY_OUT"] = str(telemetry)
-    env["COVERAGE_FILE"] = str(scratch / ".coverage")
-    env["CONFIDENCE_MEMORY"] = "1" if track_memory else "0"
-    env.pop("PYTEST_ADDOPTS", None)
+        env = test_env(workdir, [str(plugin_dir)])
+        env["CONFIDENCE_WORKDIR"] = str(workdir.resolve())
+        if repo is not None:
+            env["CONFIDENCE_REPO"] = str(Path(repo).resolve())
+        env["CONFIDENCE_TELEMETRY_OUT"] = str(telemetry)
+        env["COVERAGE_FILE"] = str(scratch / ".coverage")
+        env["CONFIDENCE_MEMORY"] = "1" if track_memory else "0"
 
-    cmd = [
-        sys.executable, "-m", "coverage", "run", f"--source={source}",
-        "-m", "pytest", tests_path, "-q", "-p", PLUGIN_MODULE,
-        f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider", *NO_SHUFFLE,
-    ]
-    if importlib.util.find_spec("xdist") is not None:
-        # Parallel workers are separate processes that coverage and the plugin
-        # don't see, so run in one process even if the project's config says -n.
-        cmd += ["-n", "0"]
-    proc = subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
-    subprocess.run(
-        [sys.executable, "-m", "coverage", "json", "-q", "--show-contexts", "-o", str(cov_json)],
-        cwd=workdir, env=env, capture_output=True, text=True,
-    )
+        cmd = [
+            sys.executable, "-m", "coverage", "run", f"--rcfile={rcfile}", f"--source={source}",
+            "-m", "pytest", tests_path, "-q", "-p", PLUGIN_MODULE,
+            f"--junitxml={junit}", "-o", "junit_family=xunit2", *pytest_flags(scratch),
+        ]
+        proc = run_pytest(cmd, optional_flags(), cwd=workdir, env=env)
+        subprocess.run(
+            [sys.executable, "-m", "coverage", "json", f"--rcfile={rcfile}", "-q", "--show-contexts",
+             "-o", str(cov_json)],
+            cwd=workdir, env=env, capture_output=True, text=True, errors="replace",
+        )
 
-    result = RunResult(label=label, exit_code=proc.returncode)
-    result.output_tail = (proc.stdout + proc.stderr)[-3000:]
-    result.tests, result.test_durations = _parse_junit(junit)
-    if cov_json.exists():
-        result.coverage = json.loads(cov_json.read_text()).get("files", {})
-    if telemetry.exists():
-        data = json.loads(telemetry.read_text())
-        result.spans, result.logs = data["spans"], data["logs"]
-        result.metrics, result.memory = data.get("metrics", []), data.get("memory", {})
-        result.node_ids = data.get("test_ids", [])
-        result.otel_enabled = data.get("otel", False)
-        result.otel_metrics_enabled = data.get("otel_metrics", False)
-        result.outside_imports = data.get("outside_imports", [])
-
-    shutil.rmtree(plugin_dir, ignore_errors=True)
-    shutil.rmtree(scratch, ignore_errors=True)
-    return result
+        result = RunResult(label=label, exit_code=proc.returncode)
+        result.output_tail = (proc.stdout + proc.stderr)[-3000:]
+        result.tests, result.test_durations = _parse_junit(junit)
+        if cov_json.exists():
+            result.coverage = json.loads(cov_json.read_text()).get("files", {})
+        if telemetry.exists():
+            data = json.loads(telemetry.read_text())
+            result.spans, result.logs = data["spans"], data["logs"]
+            result.metrics, result.memory = data.get("metrics", []), data.get("memory", {})
+            result.node_ids = data.get("test_ids", [])
+            result.otel_enabled = data.get("otel", False)
+            result.otel_metrics_enabled = data.get("otel_metrics", False)
+            result.outside_imports = data.get("outside_imports", [])
+        return result
+    finally:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)

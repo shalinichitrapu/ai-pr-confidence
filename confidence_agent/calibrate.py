@@ -43,6 +43,7 @@ class Change:
     band: str = ""
     signals: List[str] = field(default_factory=list)  # deduction names
     outcome: str = "good"  # "bad" if reverted or listed as bad
+    skipped: str = ""  # why it wasn't scored, when it wasn't an error
     why: str = ""
 
 
@@ -147,13 +148,15 @@ def report(items: List[Change]) -> str:
     for name in names:
         group = [c for c in scored if name in c.signals]
         n_bad = sum(c.outcome == "bad" for c in group)
-        lift = (n_bad / len(group)) / base_rate if base_rate and group else 0.0
-        md.append(f"| {name} | {len(group)} | {n_bad} | {lift:.1f} |")
+        # With no bad outcomes at all there's nothing to compare against: unknown, not 0.
+        lift = f"{(n_bad / len(group)) / base_rate:.1f}" if base_rate and group else "–"
+        md.append(f"| {name} | {len(group)} | {n_bad} | {lift} |")
     md += ["", "## Changes", "", "| Commit | Subject | Score | Outcome |", "|---|---|---:|---|"]
     for c in items:
-        score = "error" if c.score is None else f"{c.score} ({c.band})"
+        score = (c.skipped or "error") if c.score is None else f"{c.score} ({c.band})"
         outcome = c.outcome + (f" ({c.why})" if c.why else "")
-        md.append(f"| `{c.sha[:7]}` | {c.subject[:60]} | {score} | {outcome} |")
+        subject = " ".join(c.subject[:60].split()).replace("|", "\\|").replace("<", "&lt;")
+        md.append(f"| `{c.sha[:7]}` | {subject} | {score} | {outcome} |")
     md += ["", "_With few bad outcomes these numbers are noisy; treat them as a direction, not a fit._"]
     return "\n".join(md) + "\n"
 
@@ -207,6 +210,7 @@ def main(argv=None) -> int:
                 result_file = Path(out) / "result.json"
                 if not result_file.exists():
                     print(f"[calibrate] skipping {change.sha[:7]}: it changes nothing to score")
+                    change.skipped = "nothing to score"
                     continue
                 result = json.loads(result_file.read_text())
             except (Exception, SystemExit) as exc:  # one change that can't be scored shouldn't stop the run

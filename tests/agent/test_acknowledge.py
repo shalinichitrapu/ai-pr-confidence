@@ -21,7 +21,7 @@ def test_acknowledged_deductions_are_shown_but_not_counted():
     assert [d[0] for d in r.deductions] == ["Size"]
     assert r.acknowledged == [("Metrics", 10, "1 metric(s) grew at least 2× in the same test", "@lead")]
     md = render(r, signals(), "a" * 40, "b" * 40, None)
-    assert "| Metrics | 0 (−10 acknowledged by @lead) |" in md
+    assert "| Metrics | 0 (−10 acknowledged by `@lead`) |" in md
 
 
 def test_unknown_acks_change_nothing():
@@ -110,9 +110,9 @@ def test_self_ack_by_label_is_ignored(tmp_path, monkeypatch):
 def test_acknowledging_one_kind_never_hides_another_with_the_same_name():
     s = Signals(tests_total=5, tests_removed=["t::old"], tests_newly_failing=list("abc"), tests_failed=list("abc"))
     r = score(s, acks={"tests-removed": "@lead"})
-    assert [d[0] for d in r.acknowledged] == ["Tests"] and r.acknowledged[0][1] == 15
+    assert [d[0] for d in r.acknowledged] == ["Tests"] and r.acknowledged[0][1] == 20
     assert r.value == 45 and r.band == "Low"  # the failing tests still count
-    assert score(s, acks={"tests": "@lead"}).value == 30  # the old display-name label matches nothing
+    assert score(s, acks={"tests": "@lead"}).value == 25  # the old display-name label matches nothing
 
 
 def test_failing_tests_and_missing_results_cant_be_acknowledged():
@@ -135,7 +135,9 @@ def test_keys_list_matches_scoring():
     import inspect
     import re
     from confidence_agent import scoring
-    used = set(re.findall(r'add\("([a-z-]+)"', inspect.getsource(scoring.score)))
+    source = inspect.getsource(scoring.score)
+    used = set(re.findall(r'add\("([a-z-]+)"', source))
+    used |= {k for pair in re.findall(r'runtime\("\w+", "([a-z-]+)", "([a-z-]+)"', source) for k in pair}
     assert used == scoring.KEYS
 
 

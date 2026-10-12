@@ -89,7 +89,7 @@ def test_signals_scoring_and_config_only_warning():
     assert s.unmeasured_files == ["deploy.yaml"]
     assert s.warnings == []
     points = {d[0]: d[1] for d in score(s).deductions}
-    assert (points["Security"], points["Dependencies"]) == (10, 5)
+    assert (points["Security"], points["Dependencies"]) == (20, 5)
 
     only_config = compute(RunResult("b"), RunResult("h"), Diff(files_changed=["deploy.yaml"]), "tests")
     assert "only touches files the tests can't exercise" in only_config.warnings[0]

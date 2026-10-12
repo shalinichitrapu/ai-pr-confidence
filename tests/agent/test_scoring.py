@@ -46,16 +46,18 @@ def test_newly_failing_tests_cost_45_then_5_each_up_to_55():
     assert points(score(clean(tests_newly_failing=list("abcdef"))), "Tests") == 55
 
 
-def test_removed_tests_cost_15():
+def test_removed_tests_cost_20_then_5_each():
+    assert points(score(clean(tests_removed=["a"])), "Tests") == 20  # enough to leave High
     r = score(clean(tests_removed=["a", "b"]))
-    assert points(r, "Tests") == 15
+    assert points(r, "Tests") == 25
     assert "2 test(s) were removed" in r.deductions[0][2]
 
 
 def test_uncovered_changed_lines_cost_up_to_30_proportionally():
     assert points(score(clean(changed_code_lines=10, changed_lines_covered=0)), "Coverage") == 30
     assert points(score(clean(changed_code_lines=10, changed_lines_covered=5)), "Coverage") == 15
-    assert points(score(clean(changed_code_lines=100, changed_lines_covered=99)), "Coverage") == 0
+    # One untested line out of 100 is still reported, never rounded away to "all covered".
+    assert points(score(clean(changed_code_lines=100, changed_lines_covered=99)), "Coverage") == 1
 
 
 def test_no_changed_code_lines_means_no_coverage_row():

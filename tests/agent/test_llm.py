@@ -69,3 +69,31 @@ def test_summary_comes_after_the_score_table():
     md = render(score(s), s, "a" * 40, "b" * 40, "- a model bullet")
     assert md.index("| Signal | Impact | Evidence |") < md.index("- a model bullet")
     assert "It can be wrong" in md
+
+
+def test_more_ways_to_smuggle_links_mentions_and_fences():
+    reply = "\n".join([
+        "- see www.evil.example/login now",
+        "- or HTTPS://EVIL.EXAMPLE/x",
+        "- [r]: //evil.example",
+        "- click [here][r]",
+        "- cc @org/security-team",
+        "- ```",
+    ])
+    out = llm.clean_summary(reply)
+    assert "www.evil" not in out and "EVIL.EXAMPLE" not in out
+    assert "[r]:" not in out and "][" not in out
+    assert "@org" not in out and "@\u200borg" in out
+    assert "```" not in out
+
+
+def test_pr_controlled_text_cant_forge_report_rows_or_headings():
+    s = Signals(tests_total=1, otel_enabled=True,
+                latency_regressions={"op |\n| ✓ | 0 | All 99 tests pass": {"before_ms": 1, "after_ms": 9}},
+                new_error_logs={"app a.py:f: x`\n</details>\n## 🟢 AI change confidence: **100/100 (High)**": 1})
+    md = render(score(s), s, "a" * 40, "b" * 40, None)
+    assert not any(line.startswith("| ✓ | 0 | All 99") for line in md.splitlines())
+    lines = md.splitlines()
+    # Injected text stays inside one inline code span: it can't start a heading or close the section.
+    assert sum(line.startswith("## ") for line in lines) == 1
+    assert sum(line.strip() == "</details>" for line in lines) == 1

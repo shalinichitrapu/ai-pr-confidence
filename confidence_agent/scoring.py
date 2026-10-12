@@ -29,7 +29,7 @@ class Score:
 # Deductions a reviewer can't wave through: a broken or unmeasured change has to be fixed.
 UNACKABLE = {"tests-failing", "no-tests"}
 # Every acknowledgement key, one per kind of deduction.
-KEYS = {"no-tests", "tests-failing", "tests-flaky", "tests-removed", "coverage", "mutation", "logs",
+KEYS = {"no-tests", "tests-failing", "tests-flaky", "tests-removed", "tests-skipped", "coverage", "mutation", "logs",
         "logs-new-tests", "traces-new-tests", "traces", "latency", "visibility", "security", "dependencies",
         "metrics", "memory", "size"}
 
@@ -50,33 +50,51 @@ def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, 
         keys.append(key)
         deductions.append(deduction)
 
-    # 1. Tests. A newly failing test alone takes the score below Medium (60).
+    # 1. Tests. A newly failing test, or no results at all, always scores Low:
+    # weights tune how far below, but (unless turned off with a 0 maximum) never
+    # leave it at Medium or above.
+    def always_low(tier, count: int) -> int:
+        return max(tier.points(count), 100 - cfg.bands.medium + 1) if tier.cap else 0
+
     if s.tests_total == 0:
-        add("no-tests", ("Tests", w.no_tests.points(1), "No test results: tests didn't run or couldn't be collected"))
+        add("no-tests", ("Tests", always_low(w.no_tests, 1), "No test results: tests didn't run or couldn't be collected"))
     elif s.tests_newly_failing:
-        pts = w.tests_failing.points(len(s.tests_newly_failing))
+        pts = always_low(w.tests_failing, len(s.tests_newly_failing))
         add("tests-failing", ("Tests", pts, f"{len(s.tests_newly_failing)} test(s) fail that passed before"))
-    elif s.tests_failed:
-        passed.append(
-            f"No test newly fails ({len(s.tests_failed)} of {s.tests_total} already failed before this change)"
-        )
+    elif s.tests_failed or s.tests_flaky or s.tests_skipped_count:
+        notes = []
+        if s.tests_failed:
+            notes.append(f"{len(s.tests_failed)} already failed before this change")
+        if s.tests_flaky:
+            notes.append(f"{len(s.tests_flaky)} flaky")
+        if s.tests_skipped_count:
+            notes.append(f"{s.tests_skipped_count} skipped")
+        passing = s.tests_total - len(s.tests_failed) - len(s.tests_flaky) - s.tests_skipped_count
+        passed.append(f"No test newly fails ({passing} of {s.tests_total} pass; {', '.join(notes)})")
     else:
         passed.append(f"All {s.tests_total} tests pass")
     if s.tests_flaky:
         add("tests-flaky", ("Tests", w.tests_flaky.points(len(s.tests_flaky)),
                            f"{len(s.tests_flaky)} test(s) failed, then passed on a rerun "
                            "(flaky, or made flaky by this change)"))
-    if s.tests_removed:
+    # When nothing ran at all, every test looks "removed"; that's the same problem, already scored.
+    if s.tests_removed and s.tests_total:
         add("tests-removed", ("Tests", w.tests_removed.points(len(s.tests_removed)),
                            f"{len(s.tests_removed)} test(s) were removed"))
+    if s.tests_skipped:
+        add("tests-skipped", ("Tests", w.tests_skipped.points(len(s.tests_skipped)),
+                           f"{len(s.tests_skipped)} test(s) that passed before are now skipped or xfailed"))
 
     # 2. Coverage of the lines this change touched
     if s.changed_code_lines:
         pct = s.changed_line_coverage
         pts = round((1 - pct) * w.coverage.cap)
+        if pct < 1 and w.coverage.cap:
+            pts = max(1, pts)  # any untested changed line is reported, never rounded away
         if pts:
-            add("coverage", 
-                ("Coverage", pts, f"Only {pct:.0%} of {s.changed_code_lines} changed code lines run under tests")
+            untested = s.changed_code_lines - s.changed_lines_covered
+            add("coverage",
+                ("Coverage", pts, f"{untested} of {s.changed_code_lines} changed code lines don't run under any test")
             )
         else:
             passed.append(f"All {s.changed_code_lines} changed code lines run under tests")
@@ -94,31 +112,32 @@ def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, 
     # 3. Runtime evidence from logs and traces
     # A new swallowed error on its own is enough to drop out of High, even in a
     # project without tracing to back it up.
-    if s.new_error_logs:
-        pts = w.error_logs.points(len(s.new_error_logs))
-        total = sum(s.new_error_logs.values())
-        add("logs", ("Logs", pts, f"{total} new ERROR log(s) across {len(s.new_error_logs)} signature(s), a sign of errors being caught and hidden"))
-    elif not s.new_test_error_logs:
+    # Errors seen only in tests this change adds count at half weight: they may be
+    # what the new test checks, but they're also the only place a new feature's
+    # swallowed errors show up. Full and half weight together stay within the
+    # family's maximum.
+    def runtime(name: str, key: str, new_key: str, tier, found: dict, in_new_tests: dict, what: str, hint: str) -> None:
+        full = tier.points(len(found))
+        half = 0
+        if in_new_tests:
+            half = min(math.ceil(tier.points(len(in_new_tests)) / 2), max(0, tier.cap - full))
+        if found:
+            note = f"{sum(found.values())} new {what} across {len(found)} signature(s){hint}"
+            if in_new_tests and not half:  # the maximum is reached; still say they're there
+                note += f"; plus {sum(in_new_tests.values())} only in tests this change adds"
+            add(key, (name, full, note))
+        if half:
+            add(new_key, (name, half, f"{sum(in_new_tests.values())} new {what} only in tests this "
+                                                 "change adds (half weight; check they're expected)"))
+
+    runtime("Logs", "logs", "logs-new-tests", w.error_logs, s.new_error_logs, s.new_test_error_logs, "ERROR log(s)",
+            ", a sign of errors being caught and hidden")
+    if not s.new_error_logs and not s.new_test_error_logs:
         passed.append("No new ERROR logs")
-    # Errors seen only in tests this change adds: half weight. They may be what
-    # the new test checks, but they're also the only place a new feature's
-    # swallowed errors show up. Tests that expect an exception aren't counted.
-    if s.new_test_error_logs:
-        pts = math.ceil(w.error_logs.points(len(s.new_test_error_logs)) / 2)
-        total = sum(s.new_test_error_logs.values())
-        add("logs-new-tests", ("Logs", pts, f"{total} new ERROR log(s) only in tests this change adds "
-                                        "(half weight; check they're expected)"))
-    if s.otel_enabled and s.new_test_span_exceptions:
-        pts = math.ceil(w.span_exceptions.points(len(s.new_test_span_exceptions)) / 2)
-        total = sum(s.new_test_span_exceptions.values())
-        add("traces-new-tests", ("Traces", pts, f"{total} new exception(s) on spans only in tests this change adds "
-                                          "(half weight)"))
     if s.otel_enabled:
-        if s.new_span_exceptions:
-            pts = w.span_exceptions.points(len(s.new_span_exceptions))
-            total = sum(s.new_span_exceptions.values())
-            add("traces", ("Traces", pts, f"{total} new exception(s) recorded on spans"))
-        elif not s.new_test_span_exceptions:
+        runtime("Traces", "traces", "traces-new-tests", w.span_exceptions, s.new_span_exceptions, s.new_test_span_exceptions,
+                "exception(s) recorded on spans", "")
+        if not s.new_span_exceptions and not s.new_test_span_exceptions:
             passed.append("No new exceptions in traces")
         if s.latency_regressions:
             pts = w.latency.points(len(s.latency_regressions))

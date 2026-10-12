@@ -60,18 +60,19 @@ class Weights:
     tests_failing: Tier = Tier(45, 5, 55)
     tests_flaky: Tier = Tier(5, 0, 5)
     no_tests: Tier = Tier(50, 0, 50)
-    tests_removed: Tier = Tier(15, 0, 15)
+    tests_removed: Tier = Tier(20, 5, 40)  # one removed test is enough to leave High
+    tests_skipped: Tier = Tier(20, 5, 40)  # a test that passed before, now skipped or xfailed
     coverage: Tier = Tier(30, 0, 30)  # proportional: cap is what 0% coverage costs
     error_logs: Tier = Tier(20, 5, 25)
     span_exceptions: Tier = Tier(10, 5, 15)
     latency: Tier = Tier(10, 10, 20)
-    visibility: Tier = Tier(10, 10, 20)
+    visibility: Tier = Tier(20, 5, 30)
     metrics: Tier = Tier(10, 5, 20)
     memory: Tier = Tier(10, 10, 20)
     size: Tier = Tier(5, 0, 5)
     dependencies: Tier = Tier(5, 0, 5)
-    security: Tier = Tier(10, 10, 20)
-    mutation: Tier = Tier(15, 0, 15)  # proportional: cap is what "no test noticed any mutant" costs
+    security: Tier = Tier(20, 10, 30)
+    mutation: Tier = Tier(20, 0, 20)  # proportional: cap is what "no test noticed any mutant" costs
 
 
 @dataclass
@@ -193,6 +194,9 @@ def parse(text: str) -> Config:
             setattr(target, key, _number(value, f"{where} {key}", kind))
     if not 0 <= cfg.bands.medium <= cfg.bands.high <= 100:
         raise ConfigError("[tool.confidence.bands] needs 0 <= medium <= high <= 100")
+    _check_thresholds(cfg.thresholds)
+    if any(not e.strip() for e in cfg.expected_errors):
+        raise ConfigError("[tool.confidence] expected_errors entries can't be empty (that would match every error)")
 
     weights = _table(table.get("weights", {}), "[tool.confidence.weights]")
     _check_keys(weights, [f.name for f in fields(cfg.weights)], "[tool.confidence.weights]")
@@ -201,5 +205,22 @@ def parse(text: str) -> Config:
         if not (isinstance(value, list) and len(value) == 3
                 and all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in value)):
             raise ConfigError(f"{where} must be [first, each, maximum] as three whole numbers >= 0")
+        if value[0] > value[2]:
+            raise ConfigError(f"{where}: the first amount can't be more than the maximum")
         setattr(cfg.weights, key, Tier(*value))
     return cfg
+
+
+def _check_thresholds(th: "Thresholds") -> None:
+    where = "[tool.confidence.thresholds]"
+    for key in ("latency_ratio", "metric_ratio", "memory_ratio"):
+        if getattr(th, key) < 1:
+            raise ConfigError(f"{where} {key} must be at least 1 (it's how many times bigger counts as a change)")
+    for key in ("latency_min_delta_ms", "metric_min_delta", "memory_min_delta_mb", "large_diff_lines"):
+        if getattr(th, key) < 0:
+            raise ConfigError(f"{where} {key} can't be negative")
+    if not isinstance(th.max_mutants, int) or th.max_mutants < 0:
+        raise ConfigError(f"{where} max_mutants must be a whole number >= 0 (0 turns mutation testing off)")
+    for key in ("mutant_timeout_s", "mutation_budget_s"):
+        if getattr(th, key) <= 0:
+            raise ConfigError(f"{where} {key} must be more than 0")

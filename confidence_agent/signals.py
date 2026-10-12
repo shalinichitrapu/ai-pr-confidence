@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import difflib
 import re
 import statistics
 from collections import Counter
@@ -9,11 +11,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
-from .expectations import expects_exception, node_file
+from .expectations import expected_exceptions, node_file
 from .gitutil import Diff
 from .review_scope import config_only, risky_code, unmeasured
-from .swallow import new_silent_excepts, removed_silent_handlers
-from .runner import RunResult
+from .swallow import new_silent_excepts, removed_silent_handlers, scopes
+from .runner import RunResult, junit_id
 
 # Thresholds (how much slower, how much a metric or memory must grow) come from
 # config.Thresholds. Each requires both a ratio and a real absolute change, so
@@ -36,6 +38,8 @@ class Signals:
     risky_code: List[str] = field(default_factory=list)  # security-sensitive calls on changed lines
     unmeasured_files: List[str] = field(default_factory=list)  # config/data files tests can't exercise
     mutation_note: str = ""  # why mutation testing didn't run or couldn't conclude
+    tests_skipped_count: int = 0  # every skipped/xfailed test in the head run
+    tests_skipped: List[str] = field(default_factory=list)  # passed before, skipped or xfailed now
     tests_flaky: List[str] = field(default_factory=list)  # newly failed, then passed on a rerun
     tests_moved: Dict[str, str] = field(default_factory=dict)  # old id -> new id, same test name
 
@@ -86,29 +90,146 @@ class Signals:
 # Changes that hide code from the agent rather than fix it. Each pattern is
 # counted net (removed minus added, or added minus removed for pragmas) across
 # the whole diff, so code that merely moved between files is not flagged.
-PRAGMA = re.compile(r"#\s*pragma:\s*no\s*cover", re.IGNORECASE)
+# The same spellings coverage's default exclusion accepts (`# pragma nocover` too).
+PRAGMA = re.compile(r"#\s*pragma[:\s]?\s*no\s*cover", re.IGNORECASE)
+ERROR_LOG_CALL = re.compile(r"(?:\b|_)log\w*\.(error|exception|critical)\(|getLogger\([^)]*\)\.(error|exception|critical)\(",
+                            re.IGNORECASE)
 HIDING_PATTERNS = {
-    "coverage exclusions added": (PRAGMA, "added"),
-    "error logging removed": (re.compile(r"\blog\w*\.(error|exception|critical)\(", re.IGNORECASE), "removed"),
-    "tracing removed": (re.compile(r"\b(start_as_current_span|start_span|record_exception|set_status)\("), "removed"),
-    "metric instruments removed": (re.compile(r"\bcreate_(counter|up_down_counter|histogram|gauge)\("), "removed"),
+    "coverage exclusions added": (PRAGMA, "added", "code"),
+    "error logging removed": (ERROR_LOG_CALL, "removed", "code"),
+    "tracing removed": (re.compile(r"\b(start_as_current_span|start_span|record_exception)\(|"
+                                   r"\bset_status\(.*ERROR"), "removed", "code"),
+    "metric instruments removed": (re.compile(r"\bcreate_(counter|up_down_counter|histogram|gauge)\("), "removed", "code"),
+    # An assertion that compared values, replaced by a weaker one or none.
+    # (`is None` / `is not None` checks don't pin a value, so they don't count as comparisons.)
+    "test assertions weakened": (re.compile(r"^\s*(assert\b.*(==|!=|<=|>=|<|>|\bin\b)"
+                                            r"|self\.assert(?!(True|False|IsNone|IsNotNone|Is|IsNot)\()\w+\("
+                                            r"|(with\s+)?pytest\.(raises|approx)\()"),
+                                 "removed", "tests"),
 }
+COLLECTION_TRICKS = re.compile(r"\bcollect_ignore|pytest_collection_modifyitems|pytest_ignore_collect|--deselect\b"
+                               r"|pytest\.skip\(.*allow_module_level|pytest\.mark\.(skip|xfail)\b|\bdeselect\(")
+
+
+def _squash(text: str) -> str:
+    """Code without whitespace or brackets, so a reflowed statement still matches."""
+    return re.sub(r"[\s()]", "", text)
+
+
+def _deleted_definition_lines(diff: Diff) -> Dict[str, set]:
+    """Base lines of functions, classes and files this change deleted entirely.
+
+    Removing instrumentation together with the code it instrumented is dead-code
+    removal, not hiding.
+    """
+    out: Dict[str, set] = {}
+    for path, removed in diff.removed_lines.items():
+        if path not in diff.added_lines and path not in diff.renamed.values():
+            out[path] = set(removed)  # the whole file was deleted
+            continue
+        source = diff.base_source.get(path)
+        if not source:
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+        head_path = next((new for new, old in diff.renamed.items() if old == path), path)
+        still_there = _definitions(diff.head_source.get(head_path, ""))
+        for name, node in _definitions(source).items():
+            # A def whose lines all changed but whose name is still there was
+            # rewritten (a new signature), not deleted.
+            if name in still_there:
+                continue
+            first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+            span = set(range(first, (node.end_lineno or node.lineno) + 1))
+            if span <= removed:
+                out.setdefault(path, set()).update(span)
+    return out
+
+
+def _definitions(source: str) -> Dict[str, ast.AST]:
+    """Functions and classes by qualified name ("Cart.total")."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    where = scopes(tree)
+    return {(f"{where[id(n)][0]}.{n.name}" if where[id(n)][0] else n.name): n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+
+
+def _removed_with_numbers(diff: Diff, path: str):
+    """(base line number, text) for each removed line, when they line up."""
+    numbers, texts = sorted(diff.removed_lines.get(path, ())), diff.removed_text.get(path, [])
+    return list(zip(numbers, texts)) if len(numbers) == len(texts) else [(None, t) for t in texts]
 
 
 def _hidden_code(diff: Diff, tests_path: str) -> Dict[str, List[str]]:
     found: Dict[str, List[str]] = {}
-    for kind, (pattern, direction) in HIDING_PATTERNS.items():
+    deleted = _deleted_definition_lines(diff)
+    for kind, (pattern, direction, where) in HIDING_PATTERNS.items():
         hits = {"added": [], "removed": []}
-        for side, texts in (("added", diff.added_text), ("removed", diff.removed_text)):
-            for path, lines in texts.items():
-                if not path.endswith(".py") or _is_test_file(path, tests_path):
-                    continue
-                hits[side] += [f"{path}: {line.strip()}" for line in lines if pattern.search(line)]
+
+        def wanted(path):
+            return path.endswith(".py") and (_is_test_file(path, tests_path) == (where == "tests"))
+
+        for path, lines in diff.added_text.items():
+            if wanted(path):
+                hits["added"] += [f"{path}: {line.strip()}" for line in lines if pattern.search(line)]
+        for path in diff.removed_text:
+            if wanted(path):
+                gone = deleted.get(path, set())
+                hits["removed"] += [f"{path}: {text.strip()}" for n, text in _removed_with_numbers(diff, path)
+                                    if pattern.search(text) and n not in gone]
+        if kind == "test assertions weakened":
+            # A removed assertion still in the file, reflowed (black) or reworded, wasn't removed.
+            head = {p: _squash(t) for p, t in diff.head_source.items()}
+            hits["removed"] = [h for h in hits["removed"]
+                               if _squash(h.split(": ", 1)[1]) not in head.get(h.split(": ", 1)[0], "")]
         other = "removed" if direction == "added" else "added"
         net = len(hits[direction]) - len(hits[other])
         if net > 0:
             found[kind] = hits[direction][:net]
+
+    def conftest_tricks(texts):
+        return [(path, line.strip()) for path, lines in texts.items()
+                if path.rsplit("/", 1)[-1] == "conftest.py" for line in lines if COLLECTION_TRICKS.search(line)]
+    was_there = Counter(line for _, line in conftest_tricks(diff.removed_text))  # moved or renamed conftest
+    tricks = []
+    for path, line in conftest_tricks(diff.added_text):
+        if was_there[line] > 0:
+            was_there[line] -= 1
+        else:
+            tricks.append(f"{path}: {line}")
+    tricks += [f"pytest settings changed in {c}" for c in diff.pytest_config_changes]
+    if tricks:
+        found["test collection or configuration changed"] = tricks
     return found
+
+
+def _drops_error_handling(diff: Diff, path: str) -> set:
+    """Functions in this file where the change removed more `raise` / error-log lines than it added."""
+    def handling(line):
+        return re.match(r"\s*raise\b", line) or ERROR_LOG_CALL.search(line)
+
+    def scope_of(source, numbers):
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return Counter()
+        where, found = scopes(tree), Counter()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.stmt) and node.lineno in numbers:
+                found[where.get(id(node), ("", None))[0]] += 1
+        return found
+    base_path = diff.renamed.get(path, path)
+    removed_at = {n for n, text in _removed_with_numbers(diff, base_path) if n is not None and handling(text)}
+    head_lines = diff.head_source.get(path, "").split("\n")
+    added_at = {n for n in diff.added_lines.get(path, ()) if n <= len(head_lines) and handling(head_lines[n - 1])}
+    gone = scope_of(diff.base_source.get(base_path, ""), removed_at)
+    gone.subtract(scope_of(diff.head_source.get(path, ""), added_at))
+    return {scope for scope, n in gone.items() if n > 0}
 
 
 def _module(path: str) -> str:
@@ -172,26 +293,120 @@ def _all(test: Optional[str]) -> bool:
     return True
 
 
-def _error_log_signatures(run: RunResult, keep: Keep = _all) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for rec in run.logs:
-        if rec["level"] not in ("ERROR", "CRITICAL") or not keep(rec["test"]):
-            continue
-        sig = f"{rec['logger']} {rec['location']}: {rec['exc_type'] or rec['template']}"
-        counts[sig] = counts.get(sig, 0) + 1
-    return counts
+def _is_error_log(rec: Dict[str, Any]) -> bool:
+    return rec["level"] in ("ERROR", "CRITICAL")
 
 
-def _span_exception_signatures(run: RunResult, keep: Keep = _all) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for span in run.spans:
-        if not keep(span["test"]):
+def _log_signature(rec: Dict[str, Any]) -> str:
+    return f"{rec['logger']} {rec['location']}: {rec['exc_type'] or rec['template']}"
+
+
+def _record_signatures(records, signature, keep_record):
+    """(test, signature, exception type) for each error log (signature given) or exception on a span (None)."""
+    for rec in records:
+        if signature is not None:
+            if keep_record(rec):
+                yield rec["test"], signature(rec), rec.get("exc_type")
             continue
-        for ev in span["events"]:
+        for ev in rec["events"]:
             if ev["name"] == "exception":
-                sig = f"{span['name']}: {ev['exc_type']}"
-                counts[sig] = counts.get(sig, 0) + 1
-    return counts
+                yield rec["test"], f"{rec['name']}: {ev['exc_type']}", ev["exc_type"]
+
+
+def _signatures_by_test(records, signature, keep_record) -> Dict[Optional[str], set]:
+    found: Dict[Optional[str], set] = {}
+    for test, sig, _ in _record_signatures(records, signature, keep_record):
+        found.setdefault(test, set()).add(sig)
+    return found
+
+
+def _error_like(point: Dict[str, Any]) -> bool:
+    """A counter of failures: by its name or an attribute *value* (not the attribute's name)."""
+    return bool(ERROR_LIKE.search(point["name"]) or any(ERROR_LIKE.search(str(v)) for v in point["attributes"].values()))
+
+
+DOCS_AND_LOCKFILES = ("*.md", "*.rst", "*.txt", "docs/*", "*/docs/*", "LICENSE*", "CHANGELOG*", "*.lock",
+                      "*-lock.json", "*.lock.json", "poetry.lock", "uv.lock", "Pipfile.lock")
+
+
+def _is_docs_or_lockfile(path: str) -> bool:
+    from fnmatch import fnmatch
+    from .review_scope import is_dependency_file
+    return not is_dependency_file(path) and any(fnmatch(path, p) for p in DOCS_AND_LOCKFILES)
+
+
+def _boilerplate_lines(source: str) -> set:
+    """Top-level imports and docstrings: run on import, but not logic a test should check.
+
+    Only module-level imports count: an import inside try/except or if (a
+    fallback) is a decision the code makes, so it stays.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    lines = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    for node in ast.walk(tree):
+        is_docstring = (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, str))
+        if is_docstring:
+            lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return lines
+
+
+def _statement_lines(source: str) -> Optional[set]:
+    """Lines that start a statement of logic in a file nothing imports (None if it doesn't parse).
+
+    Imports and docstrings aren't counted: a new module's boilerplate (or a module
+    a function was moved into) isn't untested logic.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    lines = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.stmt) or isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue  # a docstring
+        lines.add(node.lineno)
+    return lines
+
+
+MOVED_BLOCK = 3  # consecutive matching lines needed to call code "moved"
+
+
+def _moved_lines(diff: Diff, tests_path: str) -> Dict[str, set]:
+    """Added lines that are a block of code this change removed elsewhere: moved, not new.
+
+    Only runs of at least MOVED_BLOCK consecutive non-blank lines matching
+    consecutive removed lines count (compared without indentation), so a single
+    common line (`return self.client.get(url)`) removed in one place doesn't make an
+    unrelated new copy elsewhere look moved.
+    """
+    removed_runs = []
+    for path, lines in diff.removed_text.items():
+        if path.endswith(".py") and not _is_test_file(path, tests_path):
+            removed_runs.append([line.strip() for line in lines if line.strip()])
+    moved: Dict[str, set] = {}
+    for path, numbers in diff.added_lines.items():
+        source = diff.head_source.get(path)
+        if source is None or _is_test_file(path, tests_path) or not removed_runs:
+            continue
+        lines = source.split("\n")
+        added = [(n, lines[n - 1].strip()) for n in sorted(numbers) if n <= len(lines) and lines[n - 1].strip()]
+        texts = [t for _, t in added]
+        for run in removed_runs:
+            matcher = difflib.SequenceMatcher(None, run, texts, autojunk=False)
+            for block in matcher.get_matching_blocks():
+                # A short removed file (a two-line helper) moved whole counts too.
+                if block.size >= max(2, min(MOVED_BLOCK, len(run))):
+                    moved.setdefault(path, set()).update(n for n, _ in added[block.b:block.b + block.size])
+    return moved
 
 
 def _series(point: Dict[str, Any]) -> str:
@@ -223,7 +438,7 @@ def _metric_values(run: RunResult) -> Dict[Tuple[str, str], Tuple[str, float]]:
     return out
 
 
-def _median_durations(run: RunResult, keep: Keep = _all) -> Dict[str, float]:
+def _median_durations(run: RunResult, keep: Keep) -> Dict[str, float]:
     by_name: Dict[str, List[float]] = {}
     for span in run.spans:
         if not keep(span["test"]):
@@ -248,7 +463,9 @@ def _without_ignored(diff: Diff, cfg: Config) -> Tuple[Diff, List[str]]:
         added_text=keep(diff.added_text),
         removed_text=keep(diff.removed_text),
         head_source=keep(diff.head_source),
-        dependency_changes=[c for c in diff.dependency_changes if not cfg.ignored(c.split(":", 1)[0])],
+        pytest_config_changes=list(diff.pytest_config_changes),
+        dependency_changes=[c for c in diff.dependency_changes
+                            if not cfg.ignored(c.split(":", 1)[0].split(" (", 1)[0])],
         removed_lines=keep(diff.removed_lines),
         base_source=keep(diff.base_source),
     )
@@ -266,15 +483,22 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         s.mutants_survived = list(head.mutation.survived)
         s.mutation_note = head.mutation.note
     s.hidden_code = _hidden_code(diff, tests_path)
-    removed = removed_silent_handlers(diff.base_source, diff.removed_lines)
-    silenced = [
-        finding
-        for path, text in sorted(diff.head_source.items())
-        if not _is_test_file(path, tests_path)
-        for finding in new_silent_excepts(path, text, diff.added_lines.get(path, ()), removed)
-    ]
+    removed = removed_silent_handlers(diff.base_source, diff.removed_lines,
+                                      skip=lambda path: _is_test_file(path, tests_path))
+    removed_in_tests = removed_silent_handlers(diff.base_source, diff.removed_lines,
+                                               skip=lambda path: not _is_test_file(path, tests_path), in_test=True)
+    silenced, in_tests = [], []
+    for path, text in sorted(diff.head_source.items()):
+        changed = diff.added_lines.get(path, ())
+        if _is_test_file(path, tests_path):
+            in_tests += new_silent_excepts(path, text, changed, removed_in_tests, in_test=True)
+        else:
+            silenced += new_silent_excepts(path, text, changed, removed,
+                                           narrow_in=_drops_error_handling(diff, path))
     if silenced:
         s.hidden_code["errors silenced without a trace"] = silenced
+    if in_tests:
+        s.hidden_code["test failures silenced"] = in_tests
 
     s.dependency_changes = list(diff.dependency_changes)
     s.risky_code = [
@@ -291,10 +515,9 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         )
 
     s.tests_total = len(head.tests)
-    base_failed = set(base.failed)
-    s.tests_flaky = [t for t in head.failed if t not in base_failed and head.rerun.get(t) == "passed"]
-    s.tests_failed = [t for t in head.failed if t not in s.tests_flaky]
-    s.tests_newly_failing = [t for t in s.tests_failed if t not in base_failed]
+    s.tests_skipped_count = sum(1 for o in head.tests.values() if o == "skipped")
+    # A test that passed before and is skipped (or xfailed) now hides its result as
+    # surely as deleting it.
     removed = sorted(set(base.tests) - set(head.tests))
     s.tests_added = sorted(set(head.tests) - set(base.tests))
     # A test counts as moved only when git saw its file renamed and the test kept
@@ -308,18 +531,34 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             added.discard(new)
         else:
             s.tests_removed.append(old)
+    # Each head test's outcome before the change, following moves.
+    before = {**base.tests, **{new: base.tests[old] for old, new in s.tests_moved.items()}}
+    # A test that passed before and is skipped (or xfailed) now hides its result as
+    # surely as deleting it.
+    s.tests_skipped = sorted(t for t, o in head.tests.items() if o == "skipped" and before.get(t) == "passed")
+    base_failed = {t for t, o in before.items() if o in ("failed", "error")}
+    s.tests_flaky = [t for t in head.failed if t not in base_failed and head.rerun.get(t) == "passed"]
+    s.tests_failed = [t for t in head.failed if t not in s.tests_flaky]
+    s.tests_newly_failing = [t for t in s.tests_failed if t not in base_failed]
 
+    moved = _moved_lines(diff, tests_path)
     for path, added in diff.added_lines.items():
         if not path.endswith(".py") or _is_test_file(path, tests_path):
             continue
         if not _in_source(path, source):
             # Coverage was never measured here, so it can't say whether tests run it.
             continue
+        added = added - moved.get(path, set()) - _boilerplate_lines(diff.head_source.get(path, ""))
         cov = head.coverage.get(path)
         if cov is None:
-            # coverage.py never saw the file: no test imported it at all.
-            s.changed_code_lines += len(added)
-            s.uncovered_changes[path] = sorted(added)
+            # coverage.py never saw the file: no test imported it at all. Count its
+            # statements, not its comments and blank lines.
+            source = diff.head_source.get(path)
+            statements = _statement_lines(source) if source is not None else None
+            changed = added & statements if statements is not None else added
+            s.changed_code_lines += len(changed)
+            if changed:
+                s.uncovered_changes[path] = sorted(changed)
             continue
         executed = set(cov.get("executed_lines", []))
         executable = executed | set(cov.get("missing_lines", []))
@@ -334,37 +573,85 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         if changed - covered:
             s.uncovered_changes[path] = sorted(changed - covered)
 
-    # Runtime evidence is scored only for tests that exist before and after, so
-    # both runs saw the same inputs. Records outside any test (e.g. at import)
-    # count too. Adding a test of an error path must not cost points.
-    shared = set(base.node_ids) & set(head.node_ids)
+    # Runtime evidence (logs, traces, latency, metrics, memory) is compared per test,
+    # for tests that exist before and after (including ones moved by a file rename),
+    # because those ran the same inputs. Each test's errors are compared with that
+    # test's own errors before the change. Records outside any test (e.g. at import)
+    # are compared with the base run's records outside any test. Tests that newly
+    # fail are left out: the failure is already scored.
+    base_by_junit = {junit_id(n): n for n in base.node_ids}
+    head_by_junit = {junit_id(n): n for n in head.node_ids}
+    base_of: Dict[str, str] = {n: n for n in head.node_ids if n in set(base.node_ids)}
+    for old, new in s.tests_moved.items():
+        if old in base_by_junit and new in head_by_junit:
+            base_of[head_by_junit[new]] = base_by_junit[old]
+    # Only newly failing tests: a flaky test costs little, so its runtime evidence still counts.
+    failing_now = {head_by_junit[j] for j in s.tests_newly_failing if j in head_by_junit}
+
+    def comparable(test: Optional[str]) -> bool:
+        return test is None or (test in base_of and test not in failing_now)
+
+    # Errors a test expects (pytest.raises / assertRaises) are listed, not scored.
+    # A new test's errors all count as expected if it expects any exception. An
+    # existing test only gets its *newly* expected exception types exempted, so
+    # adding an unrelated pytest.raises can't hide a different new error.
+    expecting = set()  # new tests that expect an exception
+    newly_expected: Dict[str, set] = {}  # existing test -> exception types it newly expects
+    for t in head.node_ids:
+        if t in failing_now:
+            continue
+        now = expected_exceptions(diff.head_source.get(node_file(t)), t)
+        if now is None:
+            continue
+        if t not in base_of:
+            expecting.add(t)
+            continue
+        then = expected_exceptions(diff.base_source.get(node_file(base_of[t])), base_of[t]) or set()
+        if now - then:
+            newly_expected[t] = now - then
+
+    def is_expected(test: Optional[str], exc_type: Optional[str]) -> bool:
+        return test in expecting or (exc_type is not None and exc_type in newly_expected.get(test, ()))
 
     def in_shared(test: Optional[str]) -> bool:
-        return test is None or test in shared
-
-    expecting = {t for t in set(head.node_ids) - shared
-                 if expects_exception(diff.head_source.get(node_file(t)), t)}
+        return comparable(test) and test not in expecting
 
     def in_new(test: Optional[str]) -> bool:
-        return test is not None and test not in shared and test not in expecting
+        return test is not None and test not in base_of and test not in failing_now and test not in expecting
 
-    def in_expecting(test: Optional[str]) -> bool:
-        return test in expecting
+    base_log_sigs = _signatures_by_test(base.logs, _log_signature, _is_error_log)
+    base_exc_sigs = _signatures_by_test(base.spans, None, None)
+    every_base_sig = set().union(*base_log_sigs.values(), *base_exc_sigs.values()) if (base_log_sigs or base_exc_sigs) else set()
 
-    base_logs = _error_log_signatures(base)
-    s.new_error_logs = {k: v for k, v in _error_log_signatures(head, in_shared).items() if k not in base_logs}
-    s.new_test_error_logs = {k: v for k, v in _error_log_signatures(head, in_new).items() if k not in base_logs}
-    base_exc = _span_exception_signatures(base)
-    s.new_span_exceptions = {
-        k: v for k, v in _span_exception_signatures(head, in_shared).items() if k not in base_exc
-    }
-    s.new_test_span_exceptions = {
-        k: v for k, v in _span_exception_signatures(head, in_new).items() if k not in base_exc
-    }
-    for found in (_error_log_signatures(head, in_expecting), _span_exception_signatures(head, in_expecting)):
+    def new_per_test(records, signature, keep_record, before, keep_test):
+        found: Dict[str, int] = {}
+        for test, sig, exc_type in _record_signatures(records, signature, keep_record):
+            if not keep_test(test):
+                continue
+            seen_before = before.get(base_of.get(test, test) if test else None, set())
+            if sig in seen_before:
+                continue
+            if is_expected(test, exc_type):
+                s.new_test_expected_errors[sig] = s.new_test_expected_errors.get(sig, 0) + 1
+            else:
+                found[sig] = found.get(sig, 0) + 1
+        return found
+
+    def new_anywhere(records, signature, keep_record, keep_test):
+        found: Dict[str, int] = {}
+        for test, sig, _ in _record_signatures(records, signature, keep_record):
+            if keep_test(test) and sig not in every_base_sig:
+                found[sig] = found.get(sig, 0) + 1
+        return found
+
+    s.new_error_logs = new_per_test(head.logs, _log_signature, _is_error_log, base_log_sigs, in_shared)
+    s.new_span_exceptions = new_per_test(head.spans, None, None, base_exc_sigs, in_shared)
+    s.new_test_error_logs = new_anywhere(head.logs, _log_signature, _is_error_log, in_new)
+    s.new_test_span_exceptions = new_anywhere(head.spans, None, None, in_new)
+    for found in (new_anywhere(head.logs, _log_signature, _is_error_log, expecting.__contains__),
+                  new_anywhere(head.spans, None, None, expecting.__contains__)):
         for sig, n in found.items():
-            if sig not in base_logs and sig not in base_exc:
-                s.new_test_expected_errors[sig] = s.new_test_expected_errors.get(sig, 0) + n
+            s.new_test_expected_errors[sig] = s.new_test_expected_errors.get(sig, 0) + n
 
     for found in (s.new_error_logs, s.new_span_exceptions, s.new_test_error_logs, s.new_test_span_exceptions):
         for sig in [k for k in found if cfg.expected(k)]:
@@ -381,13 +668,15 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
 
     # Timings from a cached base run may come from another machine (in CI, an
     # earlier job's runner), so they aren't comparable with this run's.
-    base_lat, head_lat = _median_durations(base, in_shared), _median_durations(head, in_shared)
+    base_tests = set(base_of.values())
+    base_lat = _median_durations(base, lambda t: t is None or t in base_tests)
+    head_lat = _median_durations(head, comparable)
     if base.from_cache:
         s.latency_skipped = "the base results came from the cache, possibly measured on another machine"
         head_lat = {}
     for name, after in head_lat.items():
         before = base_lat.get(name)
-        if before is None:
+        if before is None or before <= 0:
             continue
         if after >= before * th.latency_ratio and after - before >= th.latency_min_delta_ms:
             s.latency_regressions[name] = {"before_ms": round(before, 2), "after_ms": round(after, 2)}
@@ -395,24 +684,28 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     # Metrics: compare each series within the same test, which ran the same inputs.
     s.metrics_enabled = head.otel_metrics_enabled and bool(base.metrics or head.metrics)
     base_m, head_m = _metric_values(base), _metric_values(head)
-    shared_tests = set(base.node_ids) & set(head.node_ids)
+    error_like = {_series(p) for p in head.metrics if _error_like(p)}
     for (test, series), (kind, after) in head_m.items():
-        if test not in shared_tests:
+        if not comparable(test):
             continue
-        before = base_m.get((test, series), (kind, None))[1]
+        before = base_m.get((base_of.get(test, test) if test else None, series), (kind, None))[1]
         if before is None:
-            if kind == "counter" and after > 0 and ERROR_LIKE.search(series):
+            if kind == "counter" and after > 0 and series in error_like:
                 s.new_error_metrics[series] = s.new_error_metrics.get(series, 0) + after
             continue
         growth = after - before
-        if after >= before * th.metric_ratio and growth >= th.metric_min_delta:
+        # Ratios only mean something for positive values (an up-down counter can go negative).
+        if before > 0 and after >= before * th.metric_ratio and growth >= th.metric_min_delta:
             worst = s.metric_regressions.get(series)
             if worst is None or growth > worst["after"] - worst["before"]:
-                s.metric_regressions[series] = {"test": test, "kind": kind, "before": before, "after": after}
+                s.metric_regressions[series] = {"test": test or "(outside any test)", "kind": kind,
+                                                "before": before, "after": after}
 
     s.memory_enabled = bool(base.memory and head.memory)
     for test, after in head.memory.items():
-        before = base.memory.get(test)
+        if test is None or not comparable(test):
+            continue
+        before = base.memory.get(base_of[test])
         if before is None:
             continue
         if after >= before * th.memory_ratio and after - before >= th.memory_min_delta_mb * 2**20:
@@ -431,6 +724,7 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             )
 
     s.diff_lines = diff.size
-    s.code_diff_lines = sum(n for path, n in diff.file_lines.items() if not _is_test_file(path, tests_path))
+    s.code_diff_lines = sum(n for path, n in diff.file_lines.items()
+                            if not _is_test_file(path, tests_path) and not _is_docs_or_lockfile(path))
     s.files_changed = diff.files_changed
     return s

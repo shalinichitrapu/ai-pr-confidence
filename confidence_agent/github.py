@@ -14,6 +14,9 @@ from typing import Dict, Optional, Tuple
 from .report import MARKER
 
 ACK_PREFIX = "confidence-ack:"
+CI_ACCOUNT = "github-actions[bot]"
+MAX_BODY = 60000  # GitHub's limit is 65,536 characters
+
 
 
 def _gh(repo: Path, *args: str, input_text: str = None) -> str:
@@ -58,6 +61,9 @@ def post_comment(repo: Path, pr_number: int, body: str) -> str:
     Pull requests from forks get a read-only token, so posting can be
     refused. The score is still valid, so that must not fail the check.
     """
+    if len(body) > MAX_BODY:  # GitHub refuses longer comments, which would leave an old score showing
+        body = body[:MAX_BODY] + "\n\n_Report clipped; the full report is in the job summary and confidence-report/._\n"
+        body += MARKER if MARKER not in body else ""
     try:
         return _post(repo, pr_number, body)
     except (subprocess.CalledProcessError, OSError) as exc:
@@ -66,14 +72,26 @@ def post_comment(repo: Path, pr_number: int, body: str) -> str:
         return f"not posted ({reason}); the report is in the job summary and confidence-report/"
 
 
+def _me(repo: Path) -> str:
+    """The account the comment is posted as. The Actions token can't read /user; it posts as github-actions[bot]."""
+    try:
+        return _gh(repo, "api", "user", "--jq", ".login").strip() or CI_ACCOUNT
+    except (subprocess.CalledProcessError, OSError):
+        return CI_ACCOUNT
+
+
 def _post(repo: Path, pr_number: int, body: str) -> str:
+    # Only the agent's earlier comment is updated: the one posted from CI (as
+    # github-actions[bot]) or by whoever runs it now. Anyone can write a comment
+    # containing the marker, and updating theirs would put the report under their name.
+    owners = json.dumps(sorted({_me(repo), CI_ACCOUNT}))
     ids = _gh(
         repo, "api", f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments", "--paginate",
-        "--jq", f'.[] | select((.body // "") | contains("{MARKER}")) | .id',
+        "--jq", f'.[] | select((.user.login | IN({owners}[])) and ((.body // "") | contains("{MARKER}"))) | .id',
     ).split()
     payload = json.dumps({"body": body})
     if ids:
-        _gh(repo, "api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/comments/{ids[0]}",
+        _gh(repo, "api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/comments/{ids[-1]}",
             "--input", "-", input_text=payload)
         return "updated"
     _gh(repo, "api", "-X", "POST", f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments",

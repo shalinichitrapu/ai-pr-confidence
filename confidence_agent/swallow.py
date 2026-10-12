@@ -1,31 +1,53 @@
-"""Find new `except` blocks that silence errors without leaving any trace.
+"""Find new code that silences errors without leaving any trace.
 
 A swallowed error that is logged shows up in the runtime evidence. One that is
-caught and dropped (`except Exception: pass`) produces no evidence at all, so the
-only place to see it is the code.
+caught and dropped (`except Exception: pass`, `with suppress(Exception):`)
+produces no evidence at all, so the only place to see it is the code.
 """
 
 from __future__ import annotations
 
 import ast
 from collections import Counter
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Set, Tuple
 
 BROAD = {"Exception", "BaseException"}
+# In tests, catching these hides a failing assertion.
+TEST_FAILURES = {"BaseException", "AssertionError", "Exception"}
 # Calls that leave a trace of the error: logging, tracing, error reporting.
 TRACE_CALLS = {"error", "exception", "critical", "warning", "warn", "fatal",
                "record_exception", "print_exc", "print_exception", "capture_exception"}
+LOGGER_NAMES = ("log", "logger", "logging")
+# Mentioning the error here isn't handling it: it's still dropped.
+QUIET_CALLS = {"debug", "info", "print"}
 
 
-def _is_broad(handler: ast.ExceptHandler) -> bool:
-    if handler.type is None:  # bare except:
-        return True
-    names = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-    for node in names:
-        name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
-        if name in BROAD:
-            return True
-    return False
+def _quiet_call_args(handler: ast.ExceptHandler) -> set:
+    """ids of nodes inside the arguments of debug/info/print calls."""
+    inside = set()
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in QUIET_CALLS:
+                for arg in (*node.args, *[k.value for k in node.keywords]):
+                    inside.update(id(n) for n in ast.walk(arg))
+    return inside
+
+
+@dataclass(frozen=True)
+class Silencer:
+    first: int
+    last: int
+    kind: str  # "broad", "narrow", "suppress" or "test"
+    identity: str  # what it catches and where, for matching moved, re-indented or edited code
+    scope: str = ""  # the enclosing function or class, e.g. "Cart.total"
+
+
+def _names(node) -> List[str]:
+    nodes = node.elts if isinstance(node, ast.Tuple) else [node]
+    return [n.attr if isinstance(n, ast.Attribute) else getattr(n, "id", "") for n in nodes]
 
 
 def _walk_outside_nested_handlers(nodes):
@@ -44,70 +66,149 @@ def _walk_outside_nested_handlers(nodes):
 
 
 def _leaves_a_trace(handler: ast.ExceptHandler) -> bool:
+    quiet = _quiet_call_args(handler)
     for node in _walk_outside_nested_handlers(handler.body):
         if isinstance(node, ast.Raise):
+            return True
+        # The caught error is passed on: returned, stored, handed to a callback.
+        # (Only mentioned in a debug/info log or a print doesn't count.)
+        if handler.name and isinstance(node, ast.Name) and node.id == handler.name and id(node) not in quiet:
             return True
         if isinstance(node, ast.Call):
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
             if name in TRACE_CALLS:
                 return True
+            if name == "log" and isinstance(func, ast.Attribute):
+                receiver = ast.unparse(func.value).rsplit(".", 1)[-1].lower().lstrip("_")
+                level = ast.unparse(node.args[0]).upper() if node.args else ""
+                quiet_level = any(q in level for q in ("DEBUG", "INFO", "NOTSET")) or level in ("10", "20")
+                if (receiver in LOGGER_NAMES or receiver.endswith(("_log", "logger"))) and not quiet_level:
+                    return True
             # span.set_status(Status(StatusCode.ERROR)) records the error; resp.set_status(200) doesn't.
             if name == "set_status" and "ERROR" in ast.dump(node):
                 return True
     return False
 
 
-def silent_handlers(source: str, changed_lines: Iterable[int]) -> List[Tuple[int, int]]:
-    """(first, last) lines of broad except clauses on changed lines that drop the error silently."""
+def _touches(node, changed: Set[int]) -> bool:
+    return any(n in changed for n in range(node.lineno, (node.end_lineno or node.lineno) + 1))
+
+
+def scopes(tree) -> Dict[int, Tuple[str, ast.AST]]:
+    """id(node) -> (enclosing function/class name, e.g. "Cart.total"; nearest enclosing Try)."""
+    out: Dict[int, Tuple[str, ast.AST]] = {}
+
+    def visit(node, scope, try_node):
+        for child in ast.iter_child_nodes(node):
+            out[id(child)] = (scope, try_node)
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, f"{scope}.{child.name}" if scope else child.name, None)
+            else:
+                visit(child, scope, child if isinstance(child, ast.Try) else try_node)
+    visit(tree, "", None)
+    return out
+
+
+def _checks_something(try_node) -> bool:
+    """Does this try block's body assert anything (so catching failures there hides them)?"""
+    if try_node is None:
+        return False
+    for node in ast.walk(ast.Module(body=try_node.body, type_ignores=[])):
+        if isinstance(node, ast.Assert):
+            return True
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name.startswith("assert") or name == "fail":
+                return True
+    return False
+
+
+def silencers(source: str, changed_lines: Iterable[int], in_test: bool = False) -> List[Silencer]:
+    """Code on changed lines that drops errors without a trace.
+
+    - "broad": `except`/`except Exception`/`except BaseException` that neither
+      raises, logs, records nor passes the error on;
+    - "narrow": the same for a narrower exception (only a problem in context,
+      decided by the caller);
+    - "suppress": `with contextlib.suppress(Exception)`;
+    - "test": in test code, catching the failure of an assertion silently
+      (cleanup code that catches errors isn't hiding a failing check).
+    A handler counts as changed if any of its lines changed, so turning
+    `raise` into `pass` is caught.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
     changed: Set[int] = set(changed_lines)
+    where = scopes(tree)
     found = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ExceptHandler) and node.lineno in changed:
-            if _is_broad(node) and not _leaves_a_trace(node):
-                found.append((node.lineno, node.end_lineno or node.lineno))
-    return sorted(found)
+        scope, try_node = where.get(id(node), ("", None))
+        if isinstance(node, ast.ExceptHandler) and _touches(node, changed) and not _leaves_a_trace(node):
+            names = set(_names(node.type)) if node.type is not None else {"BaseException"}
+            if in_test:
+                kind = "test" if names & TEST_FAILURES and _checks_something(try_node) else ""
+            else:
+                kind = "broad" if names & BROAD else "narrow"
+            if kind:
+                caught = ast.dump(node.type) if node.type is not None else "bare"
+                found.append(Silencer(node.lineno, node.end_lineno or node.lineno, kind,
+                                      f"{kind}|{scope}|{caught}", scope))
+        elif isinstance(node, (ast.With, ast.AsyncWith)) and not in_test:
+            for item in node.items:
+                call = item.context_expr
+                if (isinstance(call, ast.Call) and _names(call.func) == ["suppress"]
+                        and any(set(_names(a)) & BROAD for a in call.args)
+                        and (node.lineno in changed or _touches(call, changed))):
+                    found.append(Silencer(call.lineno, call.lineno, "suppress",
+                                          f"suppress|{scope}|{ast.dump(call)}", scope))
+    return sorted(found, key=lambda f: f.first)
+
+
+def silent_handlers(source: str, changed_lines: Iterable[int]) -> List[Tuple[int, int]]:
+    """(first, last) lines of broad silent handlers on changed lines."""
+    return [(f.first, f.last) for f in silencers(source, changed_lines) if f.kind in ("broad", "suppress")]
 
 
 def silent_excepts(source: str, changed_lines: Iterable[int]) -> List[int]:
-    """Line numbers of broad except clauses on changed lines that drop the error silently."""
+    """Line numbers of broad silent handlers on changed lines."""
     return [first for first, _ in silent_handlers(source, changed_lines)]
 
 
-def _handler_text(lines: List[str], first: int, last: int) -> Tuple[str, ...]:
-    """A handler's code with indentation and blank lines removed, for comparing moved code."""
-    return tuple(line.strip() for line in lines[first - 1:last] if line.strip())
-
-
-def removed_silent_handlers(base_sources: Dict[str, str], removed_lines: Dict[str, Iterable[int]]) -> Counter:
-    """Silent handlers this change deleted from the base code, by their code."""
+def removed_silent_handlers(base_sources: Dict[str, str], removed_lines: Dict[str, Iterable[int]],
+                            skip=lambda path: False, in_test: bool = False) -> Counter:
+    """Silent code this change deleted or edited in the base, by what it catches and where."""
     found: Counter = Counter()
     for path, source in base_sources.items():
-        lines = source.split("\n")
-        for first, last in silent_handlers(source, removed_lines.get(path, ())):
-            found[_handler_text(lines, first, last)] += 1
+        if not skip(path):
+            for f in silencers(source, removed_lines.get(path, ()), in_test=in_test):
+                found[f.identity] += 1
     return found
 
 
-def new_silent_excepts(path: str, source: str, changed_lines: Iterable[int],
-                       removed: Counter) -> List[str]:
-    """Silent handlers on changed lines, minus ones this change only moved or re-indented.
+def new_silent_excepts(path: str, source: str, changed_lines: Iterable[int], removed: Counter,
+                       narrow_in: Iterable[str] = (), in_test: bool = False) -> List[str]:
+    """Silent code on changed lines, minus code that was already silent before.
 
-    `removed` counts silent handlers this change deleted from the base code (see
-    removed_silent_handlers). A new handler with the same code is that handler,
-    moved; each deleted handler explains only one new one. A handler that used to
-    log and no longer does is new, even if its other lines are unchanged.
+    `removed` counts silent code deleted or edited in the base (see
+    removed_silent_handlers); new code that catches the same thing in the same
+    function is that code, moved, re-indented or edited, and each one explains
+    only one new instance. A handler that used to log or raise and no longer
+    does is new, even if its other lines are unchanged. Narrow handlers count
+    only in `narrow_in`: functions where this change also dropped a raise or an
+    error log.
     """
+    narrow_in = set(narrow_in)
     lines = source.split("\n")  # the line numbering ast uses (str.splitlines also splits on \f etc.)
     found = []
-    for first, last in silent_handlers(source, changed_lines):
-        text = _handler_text(lines, first, last)
-        if removed[text] > 0:
-            removed[text] -= 1
+    for f in silencers(source, changed_lines, in_test=in_test):
+        if f.kind == "narrow" and f.scope not in narrow_in:
             continue
-        found.append(f"{path}:{first}: {lines[first - 1].strip()}")
+        if removed[f.identity] > 0:
+            removed[f.identity] -= 1
+            continue
+        found.append(f"{path}:{f.first}: {lines[f.first - 1].strip()}")
     return found

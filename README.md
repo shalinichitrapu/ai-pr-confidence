@@ -42,18 +42,19 @@ automatic first check worth having. It doesn't replace code review.
 | Tests that newly fail | −45 first, −5 each more (max −55), so the score is always Low | The change broke behavior |
 | Tests that newly fail, then pass when the same tests run again in the same order | −5 (flaky, or made flaky by this change) | One flaky test shouldn't sink an unrelated change; rerunning in the same order keeps order-dependent bugs counted as failures |
 | No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
-| Tests removed | −15 (a test whose file was renamed, keeping its name, counts as moved, not removed) | AI tools sometimes delete the failing test |
-| Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
-| Changed lines that tests run but don't check: small edits (flip `<`, swap `+`/`-`, `True`/`False`, change a number) that no covering test notices | up to −15, proportional to the share of edits that went unnoticed | Coverage only proves a line ran, not that a test would catch it being wrong |
-| Code hidden from these checks: new `# pragma: no cover`; error logging, tracing or metric instruments removed (net, so moved code doesn't count); or a new broad `except` that drops the error without raising, logging or recording it | −10 per kind (max −20) | Hiding code or errors from coverage and telemetry raises the score without making the code safer |
+| Tests removed | −20 first, −5 each more (max −40), so one is enough to leave High. A test whose file was renamed, keeping its name, counts as moved, not removed | AI tools sometimes delete the failing test |
+| Tests that passed before and are now skipped or xfailed | −20 first, −5 each more (max −40) | Skipping a failing test hides it as surely as deleting it |
+| Changed lines no test executes | up to −30, proportional; any untested line costs at least 1. Code that only moved, imports and docstrings don't count | Untested logic is unverified logic |
+| Changed lines that tests run but don't check: small edits (flip `<`, swap `+`/`-`, `True`/`False`, change a number) that no covering test notices | up to −20, proportional to the share of edits that went unnoticed | Coverage only proves a line ran, not that a test would catch it being wrong |
+| Code hidden from these checks: new `# pragma: no cover`; error logging, tracing or metric instruments removed (net, so moved code and deleted functions don't count); a new or edited `except` (or `contextlib.suppress`) that drops the error without raising, logging, recording or passing it on; in tests, silenced assertion failures or weakened assertions; tests excluded in `conftest.py` or by changed pytest settings | −20 first, −5 per extra kind (max −30) | Hiding code, errors or tests raises the score without making the code safer |
 | New ERROR log signatures | −20 first, −5 each more (max −25), so one is enough to leave High | Errors swallowed and logged while tests stay green |
 | New exceptions recorded on spans | −10 first, −5 each more (max −15) | Same, seen through traces |
 | Traced operations ≥2× slower (and ≥5 ms) | −10 each (max −20) | Performance regressions |
 | App metrics that at least doubled in the same test (and grew by ≥3), or new error-like counters | −10 first, −5 each more (max −20) | The same test doing much more work (e.g. repeated queries), or failures now being counted |
-| Security-sensitive code on changed lines: `eval`/`exec`, `pickle`, `yaml.load` without SafeLoader, `os.system`, `shell=True`, `verify=False`, MD5/SHA-1, `tempfile.mktemp`, hard-coded secrets | −10 each (max −20) | Tests and telemetry can't judge these; a small built-in subset of what bandit checks |
-| Dependencies added or changed: requirements and constraints files, and every dependency table in `pyproject.toml` (project, optional, `[dependency-groups]`, build requires, Poetry and its groups), including `-e`/git/URL/local-path lines and index URLs. Compared across files, so a moved dependency isn't new | −5 | A new package is new code nobody here reviewed |
+| Security-sensitive code on changed lines: `eval`/`exec`, `pickle`, `yaml.load` without SafeLoader, `os.system`, `shell=` anything but `False`, `verify=False`, MD5/SHA-1, `tempfile.mktemp`, hard-coded secrets (also through aliases, `getattr(os, "system")` and `__import__`) | −20 first, −10 each more (max −30) | Tests and telemetry can't judge these; a small built-in subset of what bandit checks |
+| Dependencies added or changed: requirements and constraints files, `setup.py` / `setup.cfg`, and every dependency table in `pyproject.toml` (project, optional, `[dependency-groups]`, build requires, Poetry and its groups), including `-e`/git/URL/local-path lines and index URLs. Moved dependencies aren't new | −5 | A new package is new code nobody here reviewed |
 | Tests whose peak memory at least doubled (and grew by ≥5 MB) | −10 each (max −20) | Leaks, unbounded caches, loading too much at once |
-| Very large diff (>400 lines, not counting test files) | −5 | Harder to review |
+| Very large diff (>400 lines, not counting tests, docs or lockfiles) | −5 | Harder to review |
 
 Bands: **High** ≥ 85, **Medium** 60–84, **Low** < 60.
 
@@ -65,17 +66,21 @@ neither is anything under `tests/`, `fixtures/` or `testdata/`, because tests us
 load those. YAML under `templates/` is listed, since Helm and Kubernetes charts keep
 deployment config there.
 
-Logs, exceptions on spans and latency are scored fully only for tests that exist
-both before and after the change, because those ran the same inputs. Errors that
-appear only in tests the change adds count at half weight: they're the only place a
-new feature's swallowed errors can show up. If the new test expects an exception
-(`pytest.raises` or `assertRaises`), its errors are listed but not scored.
+Logs, exceptions on spans, latency, metrics and memory are compared **per test**, for
+tests that exist both before and after the change (including tests moved by a file
+rename), because those ran the same inputs. A test's errors are compared with that
+same test's errors before the change, so a new error in a happy-path test counts
+even if another test already logged it. Tests that newly fail are left out of these
+checks: their failure is already scored. Errors that appear only in tests the change
+adds count at half weight: they're the only place a new feature's swallowed errors
+can show up. If a test expects an exception (`pytest.raises` or `assertRaises`, newly
+added to an existing test or in a new one), its errors are listed but not scored.
 
 4. Optionally, a **local model** (Ollama) writes a 2–4 bullet summary of the
    evidence. The model never changes the score, and every point is explained.
    Tests, coverage, logs and metrics give the same result every time for the same
-   code. Latency and memory come from a single measured run, so they can vary a
-   little between runs.
+   code. Latency and memory come from a single measured run, and mutation testing
+   stops at a time budget, so those can vary a little between runs.
 
 The app being tested only needs the OpenTelemetry **API**. The agent supplies the
 SDK at test time, so no changes to the target project are required.
@@ -88,9 +93,11 @@ the agent compares what one test recorded in each run:
 - **Gauges:** the last value set.
 - **Histograms:** the mean of the recorded values.
 
-A counter is "error-like" if its name or an attribute value contains error,
+A counter is "error-like" if its name or an attribute *value* contains error,
 fail, invalid, exception, retry/retries, timeout or reject. A new one of those in a test
-that already existed is flagged, even without a before value to compare.
+that already existed is flagged, even without a before value to compare. Ratios are
+only compared for positive values. Metrics recorded by tests the change adds have no
+baseline, so they aren't compared.
 
 ## Install
 
@@ -134,9 +141,11 @@ memory signals. If your code already uses the OpenTelemetry API, you also get:
 Peak-memory tracking makes tests run roughly 2–3× slower. Pass `--no-memory` to skip it.
 
 **Base-run cache.** The base branch's results are saved in `~/.cache/confidence-agent`
+(or `$XDG_CACHE_HOME/confidence-agent`)
 and reused by later runs against the same commit, keyed by the commit, `--source`,
 `--tests`, memory tracking, the Python version, installed packages and the agent's
-own version. Anything different means a fresh run. `--cache-dir` moves it and
+own version. Anything different means a fresh run. Only clean runs are saved: every
+test passed and the run didn't import your working copy. `--cache-dir` moves it and
 `--no-cache` turns it off. Only base runs where every test passed are saved, so a
 one-off failure can't excuse that test failing later. An error *log* from a one-off
 problem in a cached base run is still treated as normal for that base, so the same
@@ -152,6 +161,23 @@ the results may be unreliable.
 
 **Parallel tests.** If your pytest config uses pytest-xdist (`-n`), the agent runs
 tests in a single process. Coverage and telemetry can't see parallel workers.
+
+**Your project's own setup.** The agent uses its own coverage settings, so a
+`.coveragerc` or `[tool.coverage]` (including one a pull request edits) can't omit
+or exclude the code being scored; use `[tool.confidence] ignore` for files you
+don't want scored. Only `# pragma: no cover` (in any spelling coverage accepts)
+excludes a line, and adding one is flagged. This also means your own
+`exclude_also` patterns (e.g. `raise NotImplementedError`) aren't applied, so such
+lines can show as untested. If your tests set up OpenTelemetry themselves, the agent adds
+its span processor to your tracer provider (if your project sets its own *meter*
+provider, metrics are off, and the report doesn't claim otherwise). Logs are
+captured even if your logging config removes handlers or stops propagation.
+Changes to the pytest settings that decide which tests run (`addopts`, `testpaths`,
+`python_files`, `norecursedirs`, `xfail_strict`, ...) in pyproject.toml, pytest.ini,
+tox.ini or setup.cfg are flagged; `markers`, `filterwarnings` and the like aren't.
+CI credentials (`GH_TOKEN`, `GITHUB_TOKEN`, Actions tokens) and the files that set
+later steps' environment and the job summary are removed from the environment your
+tests run in.
 
 ## Configuration
 
@@ -187,23 +213,26 @@ mutation_budget_s = 300.0      # all mutants together; the rest are skipped when
 tests_failing = [45, 5, 55]
 tests_flaky = [5, 0, 5]
 no_tests = [50, 0, 50]
-tests_removed = [15, 0, 15]
+tests_removed = [20, 5, 40]
+tests_skipped = [20, 5, 40]
 coverage = [30, 0, 30]         # proportional: the maximum is what 0% coverage costs
 error_logs = [20, 5, 25]
 span_exceptions = [10, 5, 15]
 latency = [10, 10, 20]
-visibility = [10, 10, 20]
+visibility = [20, 5, 30]
 metrics = [10, 5, 20]
 memory = [10, 10, 20]
 size = [5, 0, 5]               # [0, 0, 0] turns a check off
 dependencies = [5, 0, 5]
-security = [10, 10, 20]
-mutation = [15, 0, 15]         # proportional: the maximum is what "no edit was noticed" costs
+security = [20, 10, 30]
+mutation = [20, 0, 20]         # proportional: the maximum is what "no edit was noticed" costs
 ```
 
 The values above are the defaults. An error signature is the text after "New
 ERROR logs" or "New exceptions on spans" in a report; `expected_errors` matches
-any part of it.
+any part of it. A newly failing test, or no test results, always scores Low:
+smaller `tests_failing` or `no_tests` weights are raised to just below `medium`,
+unless their maximum is 0 (check off).
 
 **Settings are read from the tip of the base branch, not the pull request.** A pull
 request that changes `[tool.confidence]` is scored with the current settings on
@@ -284,29 +313,36 @@ because of a wanted feature), a reviewer can add a label named
 its own key, so acknowledging a removed test never hides a failing one. The workflow
 reruns when labels change (any label: a skipped run would show as a passing check).
 A label with an unknown key is ignored, with a note in the report. The deduction stays in the report,
-shown as "0 (−10 acknowledged by @reviewer)", and no longer counts toward the score or
+shown as "0 (−10 acknowledged by `reviewer`)", and no longer counts toward the score or
 `--min-score` until the label is removed. Newly failing tests and missing test results
 can't be acknowledged. Labels added by the pull request's own author are ignored
-unless `allow_self_ack = true` is set in `[tool.confidence]`. Locally, `--ack
+unless `allow_self_ack = true` is set in `[tool.confidence]`, and labels added by a
+bot account (such as the job's own token, `github-actions[bot]`) are always ignored. Locally, `--ack
 metrics,size` does the same.
 
-The workflow runs the agent from the pull request's own checkout, so for a pull
-request from a branch in your repository, its author could change the workflow or
-the agent itself. Treat the score as a review aid, not a security boundary; branch
-protection and code review still decide what merges.
+The pull request's tests run without the job's GitHub token in their environment,
+and the workflow checks out with `persist-credentials: false` so the token isn't
+left in `.git/config` either. That's defense in depth, not isolation: the tests run
+in the same job as the agent (on Linux a process can read its parent's starting
+environment), which is why bot-added labels never count. The workflow itself runs
+from the pull request's checkout, so for a pull request from a branch in your repository, its author could
+change the workflow or the agent. Treat the score as a review aid, not a security
+boundary; branch protection and code review still decide what merges.
 
 Pull requests from forks get a read-only token, so GitHub refuses the comment.
 The agent prints a warning instead of failing, and the report still appears on
-the run's summary page.
+the run's summary page. That page is written in the same job that ran the fork's
+code, so treat a fork's summary as a convenience, and rescore it yourself (below)
+before trusting it. Very long reports are clipped to fit GitHub's comment limit.
 
 GitHub's servers can't reach a model on your own network, so CI comments have no
 summary. To add one to a pull request's comment, run the agent from your own
-machine with your model running. This needs the [GitHub CLI](https://cli.github.com)
+machine with your model running; it updates the comment CI posted. This needs the [GitHub CLI](https://cli.github.com)
 logged in (`gh auth login`):
 
 ```bash
-git fetch origin
-confidence-agent --base origin/main --head origin/my-branch --source my_package --post-to-pr 12
+git fetch origin main "pull/12/head:pr-12"   # works for pull requests from forks too
+confidence-agent --base origin/main --head pr-12 --source my_package --post-to-pr 12
 ```
 
 ## Try the demo
@@ -366,8 +402,12 @@ Add a model when you want the summary in your reports.
 The summary appears below the score table, marked as the model's reading. The
 model sees text the pull request controls (test names, log messages, file names),
 so that text is clipped and fenced off as data in the prompt, and the reply is cut
-down to at most four plain bullets with links and HTML removed. Treat the summary
-as a hint, and the table as the evidence.
+down to at most four plain bullets: links (including bare `www.` addresses),
+reference links, HTML and code fences are removed, and `@mentions` don't notify
+anyone. Treat the summary as a hint, and the table as the evidence. The rest of
+the comment escapes everything the pull request controls (test names, log messages,
+span names, file paths, config keys), so it can't add rows, headings, links,
+images or @mentions to the report.
 
 ### Setting up a local model (free)
 
@@ -448,7 +488,9 @@ confidence-calibrate [--repo .] [--branch main] [--limit 20] [--outcomes CSV]
 ```
 
 `--min-score 60` makes the command exit non-zero below 60, so it can gate merges.
-It exits 2 if the change's own `[tool.confidence]` table has a mistake.
+Exit codes: `0` scored (at or above `--min-score`), `1` below `--min-score`, `2` the
+change's own `[tool.confidence]` table has a mistake, `3` the agent couldn't run
+(for example an unknown `--base` or `--head`).
 
 ## Checking the score against outcomes
 
@@ -517,6 +559,13 @@ points if its new code isn't tested.
   that cover each mutated line, up to `max_mutants` (20) times. Use `--no-memory` and
   `--no-mutation` for large suites.
 - **It can be worked around.** A change written to score well, rather than to be
-  correct, can avoid the checks: for example by testing only the happy path, or by
-  handling errors without logging them. A High score means no warning signs were
-  found, not that the change is correct.
+  correct, can avoid the checks. Known gaps: changing a test's expected value to
+  match a bug, replacing logic with hard-coded answers that satisfy the existing
+  tests, and a new narrow `except` that quietly returns a default (it's only flagged
+  when the same change removed a `raise` or error log). A High score means no
+  warning signs were found, not that the change is correct.
+- **An untested line counts even if the change to it was harmless** (e.g. changing
+  `logger.error` to `logger.exception` on a line no test runs).
+- **CI cache scope:** GitHub doesn't share caches saved by pull-request runs between
+  pull requests, so in CI the base-run cache mostly helps repeated runs of the same
+  pull request.

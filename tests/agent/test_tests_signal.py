@@ -21,7 +21,7 @@ def test_failures_from_before_the_change_are_not_reported_as_passing():
     s = signals({"a": "failed", "b": "passed"}, {"a": "failed", "b": "passed"})
     r = score(s)
     assert r.value == 100  # the change didn't cause it
-    assert "No test newly fails (1 of 2 already failed before this change)" in r.passed_checks
+    assert "No test newly fails (1 of 2 pass; 1 already failed before this change)" in r.passed_checks
     assert not any(c.startswith("All ") and "tests pass" in c for c in r.passed_checks)
 
 
@@ -55,7 +55,7 @@ def test_same_name_in_another_file_without_a_rename_is_a_removal():
     )
     assert s.tests_moved == {}
     assert s.tests_removed == ["tests.test_pay::test_refund_is_exact"]
-    assert score(s).value == 85
+    assert score(s).value == 80
 
 
 def test_renamed_test_function_still_counts_as_removed():

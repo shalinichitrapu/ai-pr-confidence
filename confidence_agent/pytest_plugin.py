@@ -19,6 +19,8 @@ import traceback
 import tracemalloc
 from typing import Any, Dict, List, Optional
 
+import pytest
+
 _current_test: Optional[str] = None
 _span_tests: Dict[int, Optional[str]] = {}  # span id -> test running when the span started
 
@@ -38,23 +40,51 @@ _test_ids: List[str] = []  # pytest node ids, the ids metrics and memory are key
 _track_memory = os.environ.get("CONFIDENCE_MEMORY", "1") != "0"
 
 
-class _CaptureHandler(logging.Handler):
-    def emit(self, record: logging.LogRecord) -> None:
-        exc_type = None
-        if record.exc_info and record.exc_info[0] is not None:
-            exc_type = record.exc_info[0].__name__
-        _logs.append(
-            {
-                "level": record.levelname,
-                "logger": record.name,
-                # The unformatted template groups repeats of the same message.
-                "template": str(record.msg),
-                "message": record.getMessage(),
-                "exc_type": exc_type,
-                "location": f"{record.pathname.rsplit(os.sep, 1)[-1]}:{record.funcName}",
-                "test": _test_now(),
-            }
-        )
+def _location(record: logging.LogRecord) -> str:
+    """file:function, with the file relative to the checkout so two payments.py don't collide."""
+    workdir = os.environ.get("CONFIDENCE_WORKDIR")
+    path = os.path.realpath(record.pathname)
+    if workdir and path.startswith(os.path.realpath(workdir) + os.sep):
+        name = os.path.relpath(path, os.path.realpath(workdir)).replace(os.sep, "/")
+    else:
+        name = record.pathname.rsplit(os.sep, 1)[-1]
+    return f"{name}:{record.funcName}"
+
+
+def _capture(record: logging.LogRecord) -> None:
+    exc_type = None
+    if record.exc_info and record.exc_info[0] is not None:
+        exc_type = record.exc_info[0].__name__
+    try:
+        message = record.getMessage()
+    except Exception as exc:  # a bad format string must not break the test run; keep it visible
+        message = f"{record.msg} (couldn't format with {record.args!r}: {type(exc).__name__})"
+    _logs.append(
+        {
+            "level": record.levelname,
+            "logger": record.name,
+            # The unformatted template groups repeats of the same message.
+            "template": str(record.msg),
+            "message": message,
+            "exc_type": exc_type,
+            "location": _location(record),
+            "test": _test_now(),
+        }
+    )
+
+
+_original_call_handlers = logging.Logger.callHandlers
+
+
+def _call_handlers(self, record):
+    # Captured where every logger passes, not through a root handler: a project's
+    # logging.config.dictConfig can remove handlers, and propagate=False loggers
+    # never reach the root. callHandlers runs once per record, on the logger that
+    # created it, after that logger's own filters: a record the project filters
+    # out isn't captured, and the record itself isn't changed.
+    if record.levelno >= logging.WARNING:
+        _capture(record)
+    return _original_call_handlers(self, record)
 
 
 def _tag_span(span, parent_context=None) -> None:
@@ -73,9 +103,8 @@ def _tag_span(span, parent_context=None) -> None:
 
 def pytest_configure(config):  # noqa: D401 - pytest hook
     global _exporter, _metric_reader
-    handler = _CaptureHandler(level=logging.WARNING)
+    logging.Logger.callHandlers = _call_handlers
     root = logging.getLogger()
-    root.addHandler(handler)
     if root.level > logging.WARNING or root.level == logging.NOTSET:
         root.setLevel(logging.WARNING)
     try:
@@ -95,21 +124,36 @@ def pytest_configure(config):  # noqa: D401 - pytest hook
         def on_start(self, span, parent_context=None):
             _tag_span(span, parent_context)
 
-    provider.add_span_processor(_TestTagger())
-    provider.add_span_processor(SimpleSpanProcessor(_exporter))
-    trace.set_tracer_provider(provider)
+    existing = trace.get_tracer_provider()
+    if type(existing).__name__ == "ProxyTracerProvider":  # nothing set yet
+        target = provider
+        trace.set_tracer_provider(provider)
+    else:
+        # The project set up OpenTelemetry itself (e.g. in conftest.py). Only one
+        # provider can be global, so add our processors to its provider if we can.
+        target = existing if hasattr(existing, "add_span_processor") else None
+    if target is None:
+        _exporter = None  # can't observe spans; trace checks are reported as off
+    else:
+        target.add_span_processor(_TestTagger())
+        target.add_span_processor(SimpleSpanProcessor(_exporter))
 
     try:
         from opentelemetry import metrics
-        from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider, UpDownCounter
+        from opentelemetry.sdk.metrics import (
+            Counter, Histogram, MeterProvider, ObservableCounter, ObservableUpDownCounter, UpDownCounter,
+        )
         from opentelemetry.sdk.metrics.export import AggregationTemporality, InMemoryMetricReader
     except ImportError:  # pragma: no cover - metrics are optional
         return
     # Delta temporality: each collection holds only what was recorded since the
     # previous one, so collecting before and after a test isolates that test.
+    if "Proxy" not in type(metrics.get_meter_provider()).__name__:
+        return  # the project set its own meter provider; readers can't be added to it, so metrics are off
     delta = AggregationTemporality.DELTA
     _metric_reader = InMemoryMetricReader(
-        preferred_temporality={Counter: delta, UpDownCounter: delta, Histogram: delta}
+        preferred_temporality={Counter: delta, UpDownCounter: delta, Histogram: delta,
+                               ObservableCounter: delta, ObservableUpDownCounter: delta}
     )
     metrics.set_meter_provider(MeterProvider(metric_readers=[_metric_reader]))
 
@@ -159,7 +203,24 @@ def pytest_runtest_setup(item):
     _coverage_context(item.nodeid)
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    yield
+    if fixturedef.scope != "function":
+        # Finalizers run last-in first-out, so this runs just before the shared
+        # fixture's own teardown: what that teardown logs belongs to no single test
+        # (crediting it to whichever test ran last would move it when tests change).
+        def shared_teardown():
+            global _current_test
+            _current_test = None
+        fixturedef.addfinalizer(shared_teardown)
+
+
+@pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_teardown(item):
+    # Fixture finalizers run inside pytest's own teardown, so keep crediting the
+    # test until they're done.
+    yield
     global _current_test
     _current_test = None
     _coverage_context("")

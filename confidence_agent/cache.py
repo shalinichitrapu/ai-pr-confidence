@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import platform
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -27,8 +28,8 @@ def default_dir() -> Path:
 
 
 def _environment() -> str:
-    """Python version, installed packages and the agent's own source."""
-    h = hashlib.sha256(sys.version.encode())
+    """Python version, platform, installed packages and the agent's own source."""
+    h = hashlib.sha256(f"{sys.version}|{sys.platform}|{platform.machine()}".encode())
     for dist in sorted(f"{d.metadata['Name']}=={d.version}" for d in metadata.distributions()
                        if d.metadata["Name"]):
         h.update(dist.encode())
