@@ -209,3 +209,9 @@ def test_inheriting_a_broken_base_table_doesnt_block_the_pull_request(tmp_path):
     assert code == 0
     assert "has a mistake, so defaults were used" in report
     assert "This change's [tool.confidence] has a mistake" not in report
+
+
+def test_an_already_invalid_pyproject_doesnt_fail_an_unrelated_change():
+    from confidence_agent.config import raw_table
+    assert raw_table("[broken\nname = 1\n") is raw_table("[broken\nname = 2\n")
+    assert raw_table("[tool.confidence]\nsource = 'a'\n") != raw_table("[broken\n")

@@ -41,10 +41,11 @@ def _norm(name: str) -> str:
 
 def _norm_marker(marker: str) -> str:
     """Same marker however it's spaced, quoted or ordered: `a and b` == `b and a`."""
-    text = "".join(marker.split()).replace("'", '"')
-    if " or " in marker or "(" in text:
-        return text  # don't reorder anything that isn't a plain list of "and" clauses
-    return " and ".join(sorted(part for part in re.split(r"and", text) if part))
+    if re.search(r"\bor\b", marker) or "(" in marker:
+        return "".join(marker.split()).replace("'", '"')  # only plain "and" lists are reordered
+    # Split on the keyword before removing spaces, so values like "android" stay whole.
+    clauses = re.split(r"\s+and\s+", marker.strip())
+    return " and ".join(sorted("".join(c.split()).replace("'", '"') for c in clauses if c.strip()))
 
 
 def _norm_spec(spec: str) -> str:
@@ -154,7 +155,8 @@ def dependency_changes(path: str, base_text: Optional[str], head_text: Optional[
 SECRET_NAME = re.compile(r"(password|passwd|secret|api_?key|access_?key|token|private_?key)", re.IGNORECASE)
 NOT_A_SECRET = re.compile(r"^(https?://|/)")  # URLs and paths
 ENV_VAR_NAME = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$")  # APP_PASSWORD: the name of a variable, not a value
-KNOWN_SECRET = re.compile(r"^(AKIA|ASIA)[A-Z0-9]{16}$|^(sk|pk|rk)[-_]|^gh[pousr]_|^xox[abpr]-|^AIza")
+KNOWN_SECRET = re.compile(r"^(AKIA|ASIA)[A-Z0-9]{16}$|^(sk|rk)_(live|test)_|^sk-[A-Za-z0-9_-]{20,}|^gh[pousr]_"
+                          r"|^xox[abpr]-|^AIza")
 
 
 def _looks_like_secret(value: str) -> bool:
@@ -162,8 +164,11 @@ def _looks_like_secret(value: str) -> bool:
         return True
     if NOT_A_SECRET.match(value) or ENV_VAR_NAME.match(value):
         return False
-    # Real secrets mix letters and digits; names like "bert-base-uncased" don't.
-    return any(c.isdigit() for c in value) and any(c.isalpha() for c in value)
+    # Real secrets mix letters and digits, or are long unbroken strings; identifiers
+    # like "bert-base-uncased" or "my.module.name" are neither.
+    if any(c.isdigit() for c in value) and any(c.isalpha() for c in value):
+        return True
+    return len(value) >= 12 and not any(c in value for c in "-./")
 
 
 def _aliases(tree: ast.AST) -> Dict[str, str]:
@@ -275,8 +280,7 @@ INFRA = (".github/*", ".gitlab-ci.yml", ".circleci/*", "Dockerfile*", "*/Dockerf
 
 
 # Data next to tests or templates is usually loaded by the tests themselves.
-EXERCISED = ("tests/*", "test/*", "*/tests/*", "*/fixtures/*", "fixtures/*", "*/templates/*", "templates/*",
-             "*/testdata/*", "testdata/*")
+EXERCISED = ("tests/*", "test/*", "*/tests/*", "*/fixtures/*", "fixtures/*", "*/testdata/*", "testdata/*")
 
 
 def unmeasured(paths: Iterable[str]) -> List[str]:
