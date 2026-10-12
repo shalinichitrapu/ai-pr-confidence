@@ -80,3 +80,17 @@ def test_test_files_dont_count_toward_diff_size():
     assert s.diff_lines == 1070
     assert s.code_diff_lines == 120
     assert all(d[0] != "Size" for d in score(s).deductions)
+
+
+def test_an_error_in_an_old_and_a_new_test_is_counted_once():
+    head = run([OLD, NEW], logs=[error_log(OLD), error_log(NEW)])
+    s = compute(run([OLD]), head, Diff(), "tests")
+    assert s.new_error_logs == {"app a.py:f: bad input": 2}
+    assert s.new_test_error_logs == {}
+    assert score(s).value == 80
+
+
+def test_half_weight_errors_dont_also_show_as_passed_checks():
+    head = run([OLD, NEW], logs=[error_log(NEW)], spans=[span(NEW, exc="TypeError")])
+    passed = score(compute(run([OLD]), head, Diff(), "tests")).passed_checks
+    assert "No new ERROR logs" not in passed and "No new exceptions in traces" not in passed

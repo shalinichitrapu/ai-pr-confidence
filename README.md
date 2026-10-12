@@ -40,7 +40,7 @@ automatic first check worth having. It doesn't replace code review.
 | Signal | Deduction | Why it matters |
 |---|---|---|
 | Tests that newly fail | −45 first, −5 each more (max −55), so the score is always Low | The change broke behavior |
-| Tests that newly fail, then pass when rerun once | −5 (flaky, or made flaky by this change) | One flaky test shouldn't sink an unrelated change |
+| Tests that newly fail, then pass when the same tests run again in the same order | −5 (flaky, or made flaky by this change) | One flaky test shouldn't sink an unrelated change; rerunning in the same order keeps order-dependent bugs counted as failures |
 | No test results at all | −50 | Nothing was measured, so a clean score would mean nothing |
 | Tests removed | −15 (a test whose file was renamed, keeping its name, counts as moved, not removed) | AI tools sometimes delete the failing test |
 | Changed lines no test executes | up to −30, proportional | Untested logic is unverified logic |
@@ -51,15 +51,17 @@ automatic first check worth having. It doesn't replace code review.
 | Traced operations ≥2× slower (and ≥5 ms) | −10 each (max −20) | Performance regressions |
 | App metrics that at least doubled in the same test (and grew by ≥3), or new error-like counters | −10 first, −5 each more (max −20) | The same test doing much more work (e.g. repeated queries), or failures now being counted |
 | Security-sensitive code on changed lines: `eval`/`exec`, `pickle`, `yaml.load` without SafeLoader, `os.system`, `shell=True`, `verify=False`, MD5/SHA-1, `tempfile.mktemp`, hard-coded secrets | −10 each (max −20) | Tests and telemetry can't judge these; a small built-in subset of what bandit checks |
-| Dependencies added or changed (`requirements*.txt`, `pyproject.toml`) | −5 | A new package is new code nobody here reviewed |
+| Dependencies added or changed: requirements and constraints files, and every dependency table in `pyproject.toml` (project, optional, `[dependency-groups]`, build requires, Poetry and its groups), including `-e`/git/URL/local-path lines and index URLs. Compared across files, so a moved dependency isn't new | −5 | A new package is new code nobody here reviewed |
 | Tests whose peak memory at least doubled (and grew by ≥5 MB) | −10 each (max −20) | Leaks, unbounded caches, loading too much at once |
 | Very large diff (>400 lines, not counting test files) | −5 | Harder to review |
 
 Bands: **High** ≥ 85, **Medium** 60–84, **Low** < 60.
 
-Changed files the tests can't exercise (configuration, data, CI, Dockerfiles) are
-listed in the report for direct review. If a change touches only those, the report
-warns that the score says little about it.
+Changed CI, deployment and configuration files (YAML, INI, Dockerfiles, `.github/`,
+shell scripts and similar) are listed in the report for direct review, since tests
+don't load them. If a change touches only those, the report warns that the score
+says little about it. Templates and data files aren't listed, because tests often
+exercise them.
 
 Logs, exceptions on spans and latency are scored fully only for tests that exist
 both before and after the change, because those ran the same inputs. Errors that
@@ -154,7 +156,7 @@ optional; command-line flags win over the file.
 source = "my_package"          # default for --source
 tests = "tests"                # default for --tests
 min_score = 60                 # default for --min-score
-ignore = ["*/migrations/*", "*_pb2.py"]               # changed files that are never scored
+ignore = ["*migrations/*", "*_pb2.py"]                # changed files that are never scored (glob; * also matches /)
 expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures shown but not scored
 allow_self_ack = false         # may a PR's author acknowledge their own deductions?
 
@@ -195,10 +197,14 @@ The values above are the defaults. An error signature is the text after "New
 ERROR logs" or "New exceptions on spans" in a report; `expected_errors` matches
 any part of it.
 
-**Settings are read from the base commit, not the pull request.** A pull request
-that changes `[tool.confidence]` is scored with the old settings, so it can't
-loosen its own checks. Its new settings apply once it's merged. A mistake in the
-table (an unknown key or a wrong type) stops the run with a message saying where.
+**Settings are read from the tip of the base branch, not the pull request.** A pull
+request that changes `[tool.confidence]` is scored with the current settings on
+`--base`, so it can't loosen its own checks, even if it started from an older
+commit. Its new settings apply once it's merged. The pull request's own table is
+still checked: a mistake in it (an unknown key or a wrong type) makes the run fail
+with a message saying where, so it can't be merged. If the base branch's table has
+a mistake, the run warns and uses the defaults instead of blocking every pull
+request, including the one that fixes it.
 
 ## Add it to your GitHub pull requests
 
@@ -213,6 +219,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
+concurrency:
+  group: confidence-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
@@ -220,6 +230,9 @@ permissions:
 
 jobs:
   score:
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || startsWith(github.event.label.name, 'confidence-ack:')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -261,11 +274,20 @@ The agent posts a single comment and updates it on each new push. Add
 
 **Acknowledging a deduction.** When a deduction is expected (say a metric grows
 because of a wanted feature), a reviewer can add a label named
-`confidence-ack:<signal>`, e.g. `confidence-ack:metrics`. The workflow reruns on label
-changes. The deduction stays in the report, shown as "0 (−10 acknowledged by
-@reviewer)", and no longer counts toward the score or `--min-score`. Labels added by
-the pull request's own author are ignored unless `allow_self_ack = true` is set in
-`[tool.confidence]`. Locally, `--ack metrics,size` does the same.
+`confidence-ack:<key>`; the report lists the key for each deduction, e.g.
+`confidence-ack:metrics` or `confidence-ack:tests-removed`. Each kind of deduction has
+its own key, so acknowledging a removed test never hides a failing one. The workflow
+reruns when such a label is added or removed. The deduction stays in the report,
+shown as "0 (−10 acknowledged by @reviewer)", and no longer counts toward the score or
+`--min-score` until the label is removed. Newly failing tests and missing test results
+can't be acknowledged. Labels added by the pull request's own author are ignored
+unless `allow_self_ack = true` is set in `[tool.confidence]`. Locally, `--ack
+metrics,size` does the same.
+
+The workflow runs the agent from the pull request's own checkout, so for a pull
+request from a branch in your repository, its author could change the workflow or
+the agent itself. Treat the score as a review aid, not a security boundary; branch
+protection and code review still decide what merges.
 
 Pull requests from forks get a read-only token, so GitHub refuses the comment.
 The agent prints a warning instead of failing, and the report still appears on
@@ -448,8 +470,10 @@ points if its new code isn't tested.
 - `tracemalloc` only sees memory Python allocates; some native libraries' memory isn't counted.
 - **Background work:** a span is credited to the test running when it *started*, and a
   child span to its parent's test, so work that outlives its test is attributed
-  correctly. A log or metric recorded by a background thread with no trace context
-  after its test ended still counts for whichever test is running at that moment.
+  correctly. Logs, metrics and spans with no parent count for whichever test is
+  running when they happen. That's right for a long-lived worker or test server
+  (its errors belong to the test that triggered them), but a background thread with
+  no trace context that logs after its own test ended is credited to the next test.
 - **Cost:** the test suite runs twice (before and after), under coverage, and memory
   tracking makes it roughly 2–3× slower again. Mutation testing then runs the tests
   that cover each mutated line, up to `max_mutants` (20) times. Use `--no-memory` and

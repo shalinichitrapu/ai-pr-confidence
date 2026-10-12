@@ -19,7 +19,7 @@ import tempfile
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 SWAPS = {
     "<": "<=", "<=": "<", ">": ">=", ">=": ">", "==": "!=", "!=": "==",
@@ -31,21 +31,42 @@ SWAPS = {
 # Statements that only report telemetry: logging, span attributes, metric
 # recordings. Tests rarely check them and the agent measures them directly, so
 # mutating them would only add noise.
-TELEMETRY_CALLS = {"debug", "info", "warning", "warn", "error", "exception", "critical", "log",
-                   "set_attribute", "set_attributes", "add_event", "record_exception", "set_status",
-                   "add", "record", "set"}
+LOG_CALLS = {"debug", "info", "warning", "warn", "error", "exception", "critical", "log"}
+SPAN_CALLS = {"set_attribute", "set_attributes", "add_event", "record_exception", "set_status"}
+INSTRUMENT_CALLS = {"add", "record", "set"}
+INSTRUMENT_FACTORIES = {"create_counter", "create_up_down_counter", "create_histogram", "create_gauge"}
+
+
+def _instruments(tree: ast.AST) -> set:
+    """Names bound to metric instruments: `x = meter.create_counter(...)` or `self.x = ...`."""
+    names = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute) and node.value.func.attr in INSTRUMENT_FACTORIES):
+            names.update(ast.unparse(t) for t in node.targets)
+    return names
 
 
 def telemetry_lines(source: str) -> set:
-    """Line numbers of statements that are nothing but a telemetry call."""
+    """Line numbers of statements that are nothing but a telemetry call.
+
+    Logging calls on a logger-like receiver, span methods, and add/record/set on
+    a metric instrument this module created. Ordinary calls such as
+    `seen.add(x)` or `cache.set(k, v)` are logic and stay mutable.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return set()
+    instruments = _instruments(tree)
     lines = set()
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Attribute) and node.value.func.attr in TELEMETRY_CALLS):
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)):
+            continue
+        method, receiver = node.value.func.attr, ast.unparse(node.value.func.value)
+        if ((method in LOG_CALLS and "log" in receiver.lower()) or method in SPAN_CALLS
+                or (method in INSTRUMENT_CALLS and receiver in instruments)):
             lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
     return lines
 
@@ -68,6 +89,7 @@ class MutationResult:
     killed: int = 0
     survived: List[str] = field(default_factory=list)  # descriptions of mutants no test noticed
     skipped: int = 0  # couldn't run (no covering test, error, or broken mutant)
+    note: str = ""  # why mutation testing didn't run or couldn't conclude, for the report
 
 
 def mutants_for_line(source: str, path: str, line: int) -> List[Mutant]:
@@ -97,7 +119,8 @@ def mutants_for_line(source: str, path: str, line: int) -> List[Mutant]:
 
 
 def apply(source: str, mutant: Mutant) -> str:
-    lines = source.splitlines(keepends=True)
+    # Same line numbering as tokenize (str.splitlines would also split on form feeds).
+    lines = io.StringIO(source).readlines()
     text = lines[mutant.line - 1]
     lines[mutant.line - 1] = text[:mutant.col] + mutant.replacement + text[mutant.col + len(mutant.original):]
     return "".join(lines)
@@ -134,15 +157,34 @@ def _run(workdir: Path, node_ids: List[str], env: Dict[str, str], timeout: float
     return None
 
 
+def _test_ids(contexts: List[str], failing: Set[str]) -> List[str]:
+    """Usable covering tests: pytest node ids that pass without the mutant.
+
+    A project's own coverage settings can prefix contexts ("ci|tests/...") or
+    replace them (dynamic_context = "test_function"); prefixes are stripped and
+    anything that isn't a node id is dropped. Tests that already fail would
+    "catch" every mutant, so they don't count.
+    """
+    ids = {c.rsplit("|", 1)[-1] for c in contexts if c}
+    return sorted(t for t in ids if "::" in t and t not in failing)
+
+
 def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict[str, Dict[str, List[str]]],
-                  import_paths: List[str], limit: int = 20, timeout: float = 60.0) -> MutationResult:
+                  import_paths: List[str], limit: int = 20, timeout: float = 60.0,
+                  failing: Iterable[str] = (), durations: Optional[Dict[str, float]] = None) -> MutationResult:
     """Mutate covered changed lines in the checkout and run the tests that cover each one.
 
     lines: path -> changed line numbers to consider (already limited to covered source lines).
     contexts: coverage's per-file {line: [test node ids]}.
+    failing: node ids that fail (or are flaky) without any mutant; they're never used.
+    durations: node id -> seconds in the head run; each mutant gets at least 5x
+        its covering tests' normal time, so slow tests aren't mistaken for hangs.
     """
+    failing = set(failing)
+    durations = durations or {}
     candidates: Dict[Tuple[str, int], List[Mutant]] = {}
     sources: Dict[str, str] = {}
+    unusable = False
     for path, nums in lines.items():
         file = workdir / path
         if not file.is_file():
@@ -152,7 +194,10 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
         for line in nums:
             if line in skip:
                 continue
-            tests = [c for c in contexts.get(path, {}).get(str(line), []) if c]
+            raw = contexts.get(path, {}).get(str(line), [])
+            tests = _test_ids(raw, failing)
+            if not tests and any(raw):
+                unusable = True
             if tests:
                 found = mutants_for_line(sources[path], path, line)
                 if found:
@@ -160,6 +205,9 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
     result = MutationResult()
     chosen = choose(candidates, limit)
     if not chosen:
+        if unusable:
+            result.note = ("skipped: the changed lines' covering tests either fail without any change or "
+                           "aren't recorded as pytest test ids (does your coverage config set dynamic_context?)")
         return result
 
     env = dict(os.environ)
@@ -167,14 +215,15 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
     env.pop("PYTEST_ADDOPTS", None)
     for mutant in chosen:
         file = workdir / mutant.path
-        tests = sorted({c for c in contexts[mutant.path][str(mutant.line)] if c})
+        tests = _test_ids(contexts[mutant.path][str(mutant.line)], failing)
+        budget = max(timeout, 5 * sum(durations.get(t, 0.0) for t in tests) + 10)
         with tempfile.TemporaryDirectory(prefix="confidence-pyc-") as pyc:
             # A fresh bytecode cache: same-size edits made within one second could
             # otherwise reuse the cached, unmutated bytecode.
             env["PYTHONPYCACHEPREFIX"] = pyc
             try:
                 file.write_text(apply(sources[mutant.path], mutant))
-                killed = _run(workdir, tests, env, timeout)
+                killed = _run(workdir, tests, env, budget)
             finally:
                 file.write_text(sources[mutant.path])
         result.tried += 1
@@ -184,4 +233,6 @@ def run_mutations(workdir: Path, lines: Dict[str, Iterable[int]], contexts: Dict
             result.killed += 1
         else:
             result.survived.append(mutant.describe())
+    if result.tried and result.skipped == result.tried:
+        result.note = f"none of the {result.tried} mutants could be tested (the covering tests didn't run cleanly)"
     return result

@@ -37,6 +37,24 @@ def test_telemetry_only_statements_are_skipped():
     assert telemetry_lines(SOURCE) == {7}
 
 
+def test_only_real_telemetry_receivers_are_skipped():
+    src = (
+        "errors = meter.create_counter('e')\n"
+        "def f(cache, seen, k, v):\n"
+        "    seen.add(k + 1)\n"
+        "    cache.set(k, v * 2)\n"
+        "    errors.add(1)\n"
+        "    log.error('x %s', k + 1)\n"
+        "    results.error(k + 1)\n"
+    )
+    assert telemetry_lines(src) == {5, 6}
+
+
+def test_form_feed_doesnt_shift_mutations():
+    src = "LIMIT = 5\n\x0c\ndef g(x):\n    return x < LIMIT + 1\n"
+    assert len(mutants_for_line(src, "m.py", 4)) == 3
+
+
 def test_apply_changes_exactly_one_token():
     mutant = Mutant("a.py", 2, 15, ">=", ">")
     assert apply(SOURCE, mutant).splitlines()[1] == "    return age > 18"
@@ -119,3 +137,40 @@ def test_end_to_end_weak_test_is_caught_and_can_be_turned_off(tmp_path):
     cli.main(base_args + ["--no-mutation", "--out", str(tmp_path / "off")])
     off = json.loads((tmp_path / "off" / "result.json").read_text())
     assert off["signals"]["mutants_tested"] == 0
+
+
+def weak_project(tmp_path, extra_tests=""):
+    return write(tmp_path / "p", {
+        "app.py": "def is_adult(age):\n    return age >= 18\n",
+        "tests/test_a.py": "import time\nfrom app import is_adult\n\ndef test_weak():\n    assert is_adult(30)\n"
+                           + extra_tests,
+    })
+
+
+def test_already_failing_tests_dont_catch_mutants(tmp_path):
+    project = weak_project(tmp_path, "\ndef test_broken():\n    is_adult(1)\n    assert False\n")
+    ctx = {"app.py": {"2": ["tests/test_a.py::test_weak", "tests/test_a.py::test_broken"]}}
+    result = run_mutations(project, {"app.py": [2]}, ctx, [str(project)], failing={"tests/test_a.py::test_broken"})
+    assert (result.killed, len(result.survived)) == (0, 2)
+
+
+def test_slow_tests_get_time_to_finish(tmp_path):
+    project = weak_project(tmp_path, "\ndef test_slow():\n    time.sleep(2)\n    assert is_adult(40)\n")
+    ctx = {"app.py": {"2": ["tests/test_a.py::test_slow"]}}
+    result = run_mutations(project, {"app.py": [2]}, ctx, [str(project)], timeout=1.0,
+                           durations={"tests/test_a.py::test_slow": 2.0})
+    assert (result.killed, len(result.survived)) == (0, 2)
+
+
+def test_coverage_context_prefixes_are_stripped(tmp_path):
+    project = weak_project(tmp_path)
+    ctx = {"app.py": {"2": ["ci|tests/test_a.py::test_weak"]}}
+    result = run_mutations(project, {"app.py": [2]}, ctx, [str(project)])
+    assert len(result.survived) == 2
+
+
+def test_unusable_contexts_are_reported_not_silently_passed(tmp_path):
+    project = weak_project(tmp_path)
+    ctx = {"app.py": {"2": ["test_a.test_weak"]}}  # dynamic_context = "test_function"
+    result = run_mutations(project, {"app.py": [2]}, ctx, [str(project)])
+    assert result.tried == 0 and "dynamic_context" in result.note

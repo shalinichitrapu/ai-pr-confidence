@@ -11,7 +11,6 @@ repository has to change.
 
 from __future__ import annotations
 
-import contextvars
 import json
 import logging
 import os
@@ -21,14 +20,15 @@ import tracemalloc
 from typing import Any, Dict, List, Optional
 
 _current_test: Optional[str] = None
-# Also kept in a context variable: asyncio tasks copy it from the test that created
-# them, so their telemetry stays with that test even if they finish later.
-_test_var: contextvars.ContextVar = contextvars.ContextVar("confidence_test", default=None)
 _span_tests: Dict[int, Optional[str]] = {}  # span id -> test running when the span started
 
 
 def _test_now() -> Optional[str]:
-    return _test_var.get() or _current_test
+    # The test running right now. Deliberately not a context variable: a
+    # long-lived asyncio task (a server or queue worker started by a shared
+    # fixture) would carry the first test's value forever and get every later
+    # test's errors credited to it.
+    return _current_test
 _logs: List[Dict[str, Any]] = []
 _exporter = None
 _metric_reader = None
@@ -159,19 +159,12 @@ def _coverage_context(name: str) -> None:
 def pytest_runtest_setup(item):
     global _current_test
     _current_test = item.nodeid
-    item._confidence_test_token = _test_var.set(item.nodeid)
     _coverage_context(item.nodeid)
 
 
 def pytest_runtest_teardown(item):
     global _current_test
     _current_test = None
-    token = getattr(item, "_confidence_test_token", None)
-    if token is not None:
-        try:
-            _test_var.reset(token)
-        except ValueError:  # pragma: no cover - set in a different context
-            _test_var.set(None)
     _coverage_context("")
 
 

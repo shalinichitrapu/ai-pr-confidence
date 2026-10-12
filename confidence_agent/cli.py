@@ -56,12 +56,22 @@ def main(argv=None) -> int:
         return 0
 
     print(f"[confidence] base {base_sha[:7]}  head {head_sha[:7]}")
-    # Settings come from the base commit, so a pull request can't loosen its own checks.
+    # Settings come from the tip of the base branch (not the possibly older commit
+    # this change started from), so a pull request can't loosen its own checks.
+    config_warnings, config_broken = [], False
     try:
-        cfg = config.parse(gitutil.read_file(repo, base_sha, "pyproject.toml") or "")
+        cfg = config.parse(gitutil.read_file(repo, gitutil.resolve(repo, args.base), "pyproject.toml") or "")
     except config.ConfigError as exc:
-        print(f"[confidence] error in [tool.confidence] at the base commit: {exc}")
-        return 2
+        # Don't block every pull request (including the one fixing it) on a broken base.
+        cfg = config.Config()
+        config_warnings.append(f"[tool.confidence] on {args.base} has a mistake, so defaults were used: {exc}")
+    try:
+        config.parse(gitutil.read_file(repo, head_sha, "pyproject.toml") or "")
+    except config.ConfigError as exc:
+        config_broken = True
+        config_warnings.append(f"This change's [tool.confidence] has a mistake; fix it before merging: {exc}")
+    for warning in config_warnings:
+        print(f"[confidence] WARNING: {warning}")
     args.source = args.source or cfg.source or "."
     args.tests = args.tests or cfg.tests or "tests"
     args.min_score = args.min_score if args.min_score is not None else (cfg.min_score or 0)
@@ -87,19 +97,23 @@ def main(argv=None) -> int:
                 wt, label, args.source, args.tests, track_memory=not args.no_memory, repo=repo
             )
             if label == "head":
-                # Rerun tests that newly fail once, so one flaky test can't sink the score.
+                # Rerun the tests once if something newly failed, so one flaky test can't sink the score.
                 base_failed = set(runs["base"].failed)
                 newly = [t for t in runs["head"].failed if t not in base_failed]
                 if newly:
-                    print(f"[confidence] rerunning {len(newly)} newly failing test(s) to check for flakiness...")
-                    runs["head"].rerun = runner.rerun_tests(wt, newly)
+                    print(f"[confidence] {len(newly)} test(s) newly failed; running the tests again to check for flakiness...")
+                    runs["head"].rerun = runner.rerun_tests(wt, newly, args.tests)
                 limit = cfg.thresholds.max_mutants
                 targets = signals.mutation_targets(diff, runs["head"].coverage, args.tests, args.source, cfg)
                 if targets and limit > 0 and not args.no_mutation:
                     print(f"[confidence] mutation testing up to {limit} change(s) to changed lines...")
                     contexts = {p: runs["head"].coverage[p].get("contexts", {}) for p in targets}
-                    runs["head"].mutation = mutate.run_mutations(
-                        wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s
+                    head = runs["head"]
+                    failing = {n for n in head.node_ids if runner.junit_id(n) in set(head.failed)}
+                    durations = {n: head.test_durations.get(runner.junit_id(n), 0.0) for n in head.node_ids}
+                    head.mutation = mutate.run_mutations(
+                        wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s,
+                        failing=failing, durations=durations,
                     )
             if label == "base" and not args.no_cache and runs["base"].tests:
                 cache.save(cache_dir, base_key, runs["base"])
@@ -112,6 +126,7 @@ def main(argv=None) -> int:
         print("[confidence] no test results from head run. pytest output:\n" + runs["head"].output_tail)
 
     sig = signals.compute(runs["base"], runs["head"], diff, args.tests, args.source, cfg)
+    sig.warnings.extend(config_warnings)
     for warning in sig.warnings:
         print(f"[confidence] WARNING: {warning}")
     acks = {a.strip().lower(): "the command line" for a in args.ack.split(",") if a.strip()}
@@ -125,6 +140,9 @@ def main(argv=None) -> int:
                              f"(@{who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
             else:
                 acks[signal] = f"@{who}"
+    for key in sorted(set(acks) & scoring.UNACKABLE):
+        notes.append(f"Ignored confidence-ack:{key}: newly failing tests and missing test results "
+                     "can't be acknowledged; they need fixing.")
     for note in notes:
         print(f"[confidence] {note}")
     result = scoring.score(sig, cfg, acks)
@@ -156,6 +174,8 @@ def main(argv=None) -> int:
         from .github import post_comment
         print(f"[confidence] PR #{args.post_to_pr}: comment {post_comment(repo, args.post_to_pr, md)}")
 
+    if config_broken:
+        return 2
     return 1 if result.value < args.min_score else 0
 
 
