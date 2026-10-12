@@ -1,13 +1,15 @@
 """Per-project settings from the [tool.confidence] table in pyproject.toml.
 
-The agent reads this from the *base* commit, never from the pull request, so a
-change can't lower its own thresholds or mark its own errors as expected.
+The agent reads this from the tip of the base branch, never from the pull
+request, so a change can't lower its own thresholds or mark its own errors as
+expected. The pull request's own table is still checked, so a mistake in it
+fails the run before it can be merged.
 
     [tool.confidence]
     source = "my_package"               # default for --source
     tests = "tests"                     # default for --tests
     min_score = 60                      # default for --min-score
-    ignore = ["*/migrations/*", "*_pb2.py"]          # changed files never scored
+    ignore = ["*migrations/*", "*_pb2.py"]           # changed files never scored
     expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures not scored
 
     [tool.confidence.bands]
@@ -103,6 +105,12 @@ class Config:
         return any(text in signature for text in self.expected_errors)
 
 
+def _table(value: Any, where: str) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{where} must be a table, got {value!r}")
+    return value
+
+
 def _check_keys(table: Dict[str, Any], allowed, where: str) -> None:
     unknown = sorted(set(table) - set(allowed))
     if unknown:
@@ -127,7 +135,8 @@ def parse(text: str) -> Config:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"pyproject.toml is not valid TOML: {exc}") from exc
-    table = doc.get("tool", {}).get("confidence", {})
+    tool = _table(doc.get("tool", {}), "[tool]")
+    table = _table(tool.get("confidence", {}), "[tool.confidence]")
     cfg = Config()
     if not table:
         return cfg
@@ -147,15 +156,15 @@ def parse(text: str) -> Config:
         cfg.expected_errors = _strings(table["expected_errors"], "[tool.confidence] expected_errors")
 
     for name, target, kind in (("bands", cfg.bands, int), ("thresholds", cfg.thresholds, (int, float))):
-        sub = table.get(name, {})
         where = f"[tool.confidence.{name}]"
+        sub = _table(table.get(name, {}), where)
         _check_keys(sub, [f.name for f in fields(target)], where)
         for key, value in sub.items():
             setattr(target, key, _number(value, f"{where} {key}", kind))
     if not 0 <= cfg.bands.medium <= cfg.bands.high <= 100:
         raise ConfigError("[tool.confidence.bands] needs 0 <= medium <= high <= 100")
 
-    weights = table.get("weights", {})
+    weights = _table(table.get("weights", {}), "[tool.confidence.weights]")
     _check_keys(weights, [f.name for f in fields(cfg.weights)], "[tool.confidence.weights]")
     for key, value in weights.items():
         where = f"[tool.confidence.weights] {key}"
