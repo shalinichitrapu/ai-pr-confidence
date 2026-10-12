@@ -242,3 +242,17 @@ def test_small_test_failure_weights_still_score_low():
     off = score(s, parse("[tool.confidence.weights]\ntests_failing = [0, 0, 0]\n"))
     assert off.value == 100  # a 0 maximum turns the check off, as for every other weight
     assert parse("[tool.confidence.bands]\nhigh = 0\nmedium = 0\n").bands.medium == 0
+
+
+@pytest.mark.parametrize("text", [
+    "[tool.confidence.thresholds]\nlatency_ratio = 1\nmetric_ratio = 1\nmemory_ratio = 1\n",
+    "[tool.confidence.thresholds]\nlatency_min_delta_ms = 0\nmetric_min_delta = 0\nlarge_diff_lines = 0\n",
+    "[tool.confidence.thresholds]\nmax_mutants = 0\nmutant_timeout_s = 0.5\n",
+])
+def test_boundary_settings_are_accepted(text):
+    parse(text)  # exactly 1x, a 0 delta and 0 mutants are all valid
+
+
+def test_a_zero_timeout_is_rejected():
+    with pytest.raises(ConfigError, match="mutation_budget_s must be more than 0"):
+        parse("[tool.confidence.thresholds]\nmutation_budget_s = 0\n")

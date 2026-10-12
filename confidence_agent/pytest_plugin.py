@@ -57,8 +57,8 @@ def _capture(record: logging.LogRecord) -> None:
         exc_type = record.exc_info[0].__name__
     try:
         message = record.getMessage()
-    except Exception:  # pragma: no cover - a bad format string must not break the test run
-        message = str(record.msg)
+    except Exception as exc:  # a bad format string must not break the test run; keep it visible
+        message = f"{record.msg} (couldn't format with {record.args!r}: {type(exc).__name__})"
     _logs.append(
         {
             "level": record.levelname,

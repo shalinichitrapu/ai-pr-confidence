@@ -240,3 +240,11 @@ def test_a_crash_exits_3_not_1(monkeypatch, tmp_path):
     repo = two_commits(tmp_path, {}, {"pkg/b.py": "y = 2\n"})
     monkeypatch.setattr(cli.gitutil, "read_diff", lambda *a: 1 / 0)
     assert cli.main(["--repo", str(repo), "--base", "main", "--head", "change", "--no-llm"]) == cli.COULDNT_RUN
+
+
+def test_a_log_message_that_cant_be_formatted_is_still_captured(tmp_path):
+    p = project(tmp_path / "p", {"pkg/__init__.py": (
+        "import logging\n\ndef f():\n    logging.getLogger('app').error('total %d', 'oops')\n    return 1\n")})
+    r = run_tests(p, "head", "pkg", "tests", track_memory=False)
+    [record] = [x for x in r.logs if x["template"] == "total %d"]
+    assert "couldn't format" in record["message"] and "TypeError" in record["message"]
