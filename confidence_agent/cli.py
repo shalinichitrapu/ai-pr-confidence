@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import gitutil, llm, report, runner, scoring, signals
+from . import config, gitutil, llm, report, runner, scoring, signals
 
 
 def parse_args(argv=None):
@@ -23,8 +23,9 @@ def parse_args(argv=None):
     p.add_argument("--repo", default=".", help="path to the git repository (default: .)")
     p.add_argument("--base", default="main", help="branch or commit the change targets (default: main)")
     p.add_argument("--head", default="HEAD", help="branch or commit with the change (default: HEAD)")
-    p.add_argument("--source", default=".", help="package/folder to measure coverage for (comma-separate several); changed files outside it are not coverage-checked")
-    p.add_argument("--tests", default="tests", help="test folder (default: tests)")
+    p.add_argument("--source", help="package/folder to measure coverage for (comma-separate several); changed "
+                   "files outside it are not coverage-checked (default: [tool.confidence] source, else .)")
+    p.add_argument("--tests", help="test folder (default: [tool.confidence] tests, else tests)")
     p.add_argument("--out", default="confidence-report", help="folder for report.md and result.json")
     p.add_argument("--no-memory", action="store_true",
                    help="skip per-test peak memory measurement (tracemalloc slows tests down)")
@@ -32,7 +33,8 @@ def parse_args(argv=None):
     p.add_argument("--llm-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     p.add_argument("--llm-model", default=os.environ.get("OLLAMA_MODEL", "qwen2.5:3b"))
     p.add_argument("--post-to-pr", type=int, metavar="NUMBER", help="post/update the report as a PR comment via gh")
-    p.add_argument("--min-score", type=int, default=0, help="exit 1 if the score is below this (for CI gates)")
+    p.add_argument("--min-score", type=int,
+                   help="exit 1 if the score is below this, for CI gates (default: [tool.confidence] min_score, else 0)")
     return p.parse_args(argv)
 
 
@@ -46,6 +48,28 @@ def main(argv=None) -> int:
         return 0
 
     print(f"[confidence] base {base_sha[:7]}  head {head_sha[:7]}")
+    # Settings come from the tip of the base branch (not the possibly older commit
+    # this change started from), so a pull request can't loosen its own checks.
+    config_warnings, config_broken = [], False
+    try:
+        cfg = config.parse(gitutil.read_file(repo, gitutil.resolve(repo, args.base), "pyproject.toml") or "")
+    except config.ConfigError as exc:
+        # Don't block every pull request (including the one fixing it) on a broken base.
+        cfg = config.Config()
+        config_warnings.append(f"[tool.confidence] on {args.base} has a mistake, so defaults were used: {exc}")
+    head_toml = gitutil.read_file(repo, head_sha, "pyproject.toml") or ""
+    try:
+        config.parse(head_toml)
+    except config.ConfigError as exc:
+        # Only this change's own mistake fails the run; one it inherited
+        # unchanged from the base would otherwise block every pull request.
+        start_toml = gitutil.read_file(repo, base_sha, "pyproject.toml") or ""
+        if config.raw_table(head_toml) != config.raw_table(start_toml):
+            config_broken = True
+            config_warnings.append(f"This change's [tool.confidence] has a mistake; fix it before merging: {exc}")
+    args.source = args.source or cfg.source or "."
+    args.tests = args.tests or cfg.tests or "tests"
+    args.min_score = args.min_score if args.min_score is not None else (cfg.min_score or 0)
     diff = gitutil.read_diff(repo, base_sha, head_sha)
 
     tmp = Path(tempfile.mkdtemp(prefix="confidence-wt-"))
@@ -66,10 +90,11 @@ def main(argv=None) -> int:
     if not runs["head"].tests:
         print("[confidence] no test results from head run. pytest output:\n" + runs["head"].output_tail)
 
-    sig = signals.compute(runs["base"], runs["head"], diff, args.tests, args.source)
+    sig = signals.compute(runs["base"], runs["head"], diff, args.tests, args.source, cfg)
+    sig.warnings.extend(config_warnings)
     for warning in sig.warnings:
         print(f"[confidence] WARNING: {warning}")
-    result = scoring.score(sig)
+    result = scoring.score(sig, cfg)
     print(f"[confidence] score {result.value}/100 ({result.band})")
 
     summary = None
@@ -97,6 +122,8 @@ def main(argv=None) -> int:
         from .github import post_comment
         print(f"[confidence] PR #{args.post_to_pr}: comment {post_comment(repo, args.post_to_pr, md)}")
 
+    if config_broken:
+        return 2
     return 1 if result.value < args.min_score else 0
 
 

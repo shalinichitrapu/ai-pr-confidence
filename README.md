@@ -129,6 +129,60 @@ the results may be unreliable.
 **Parallel tests.** If your pytest config uses pytest-xdist (`-n`), the agent runs
 tests in a single process. Coverage and telemetry can't see parallel workers.
 
+## Configuration
+
+Add a `[tool.confidence]` table to your project's `pyproject.toml`. Everything is
+optional; command-line flags win over the file.
+
+```toml
+[tool.confidence]
+source = "my_package"          # default for --source
+tests = "tests"                # default for --tests
+min_score = 60                 # default for --min-score
+ignore = ["migrations/*", "*/migrations/*", "*_pb2.py"]  # changed files never scored (glob; * also matches /)
+expected_errors = ["payments.py:refund: TimeoutError"]  # error signatures shown but not scored
+
+[tool.confidence.bands]
+high = 85
+medium = 60
+
+[tool.confidence.thresholds]
+large_diff_lines = 400
+latency_ratio = 2.0
+latency_min_delta_ms = 5.0
+metric_ratio = 2.0
+metric_min_delta = 3.0
+memory_ratio = 2.0
+memory_min_delta_mb = 5.0
+
+[tool.confidence.weights]      # [first finding, each additional, maximum]
+tests_failing = [45, 5, 55]
+no_tests = [50, 0, 50]
+tests_removed = [15, 0, 15]
+coverage = [30, 0, 30]         # proportional: the maximum is what 0% coverage costs
+error_logs = [20, 5, 25]
+span_exceptions = [10, 5, 15]
+latency = [10, 10, 20]
+visibility = [10, 10, 20]
+metrics = [10, 5, 20]
+memory = [10, 10, 20]
+size = [5, 0, 5]               # [0, 0, 0] turns a check off
+```
+
+The values above are the defaults. An error signature is the text after "New
+ERROR logs" or "New exceptions on spans" in a report; `expected_errors` matches
+any part of it.
+
+**Settings are read from the tip of the base branch, not the pull request.** A pull
+request that changes `[tool.confidence]` is scored with the current settings on
+`--base`, so it can't loosen its own checks, even if it started from an older
+commit. Its new settings apply once it's merged. The pull request's own table is
+still checked: a mistake in it (an unknown key or a wrong type) makes the run fail
+with a message saying where, so it can't be merged. If the base branch's table has
+a mistake, the run warns and uses the defaults instead of blocking every pull
+request: pull requests that leave the table alone, and the one that fixes it, are
+still scored.
+
 ## Add it to your GitHub pull requests
 
 To score every pull request and post the result as a comment, add this file to

@@ -108,6 +108,9 @@ def test_in_source_matching():
     assert _in_source("lib/b.py", "pkg,lib")
     assert _in_source("lib/b.py", "pkg, lib")
     assert not _in_source("other/c.py", "pkg,lib")
+    assert _in_source("app.py", "app")
+    assert _in_source("my/pkg.py", "my.pkg")
+    assert not _in_source("application.py", "app")
 
 
 # --- logs and traces -----------------------------------------------------
