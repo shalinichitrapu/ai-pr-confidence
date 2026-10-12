@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 PLUGIN_MODULE = "confidence_pytest_plugin"
+# Plugins that shuffle test order. The before, after and rerun runs must use the
+# same order, or an order-dependent failure could pass on the rerun by chance.
+NO_SHUFFLE = ["-p", "no:randomly", "-p", "no:random_order"]
 
 
 @dataclass
@@ -32,6 +35,7 @@ class RunResult:
     otel_metrics_enabled: bool = False
     # Files the tests imported from the user's repository instead of this checkout.
     outside_imports: List[str] = field(default_factory=list)
+    rerun: Dict[str, str] = field(default_factory=dict)  # test id -> outcome when run again
     exit_code: int = 0
     output_tail: str = ""
 
@@ -76,6 +80,31 @@ def _import_paths(workdir: Path) -> List[str]:
     return paths
 
 
+def rerun_tests(workdir: Path, test_ids: List[str], tests_path: str) -> Dict[str, str]:
+    """Run the same tests again, in the same order, and return the outcomes of test_ids.
+
+    The whole set runs again, not just the failing tests: a failure that depends
+    on test order or on state another test leaves behind passes when the test
+    runs alone, and must not be mistaken for flakiness. It runs plainly (no
+    coverage or telemetry), and only when something newly failed.
+    """
+    if not test_ids:
+        return {}
+    scratch = Path(tempfile.mkdtemp(prefix="confidence-rerun-"))
+    junit = scratch / "junit.xml"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (*_import_paths(workdir), env.get("PYTHONPATH", "")) if p)
+    env.pop("PYTEST_ADDOPTS", None)
+    cmd = [sys.executable, "-m", "pytest", tests_path, "-q",
+           f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider", *NO_SHUFFLE, *NO_SHUFFLE]
+    if importlib.util.find_spec("xdist") is not None:
+        cmd += ["-n", "0"]
+    subprocess.run(cmd, cwd=workdir, env=env, capture_output=True, text=True)
+    outcomes, _ = _parse_junit(junit)
+    shutil.rmtree(scratch, ignore_errors=True)
+    return {t: outcomes[t] for t in test_ids if t in outcomes}
+
+
 def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_memory: bool = True,
               repo: Path = None) -> RunResult:
     scratch = Path(tempfile.mkdtemp(prefix=f"confidence-{label}-"))
@@ -99,7 +128,7 @@ def run_tests(workdir: Path, label: str, source: str, tests_path: str, track_mem
     cmd = [
         sys.executable, "-m", "coverage", "run", f"--source={source}",
         "-m", "pytest", tests_path, "-q", "-p", PLUGIN_MODULE,
-        f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider",
+        f"--junitxml={junit}", "-o", "junit_family=xunit2", "-p", "no:cacheprovider", *NO_SHUFFLE,
     ]
     if importlib.util.find_spec("xdist") is not None:
         # Parallel workers are separate processes that coverage and the plugin

@@ -58,6 +58,7 @@ class Tier:
 @dataclass
 class Weights:
     tests_failing: Tier = Tier(45, 5, 55)
+    tests_flaky: Tier = Tier(5, 0, 5)
     no_tests: Tier = Tier(50, 0, 50)
     tests_removed: Tier = Tier(15, 0, 15)
     coverage: Tier = Tier(30, 0, 30)  # proportional: cap is what 0% coverage costs

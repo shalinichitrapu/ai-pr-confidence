@@ -41,6 +41,10 @@ def score(s: Signals, config: Optional[Config] = None) -> Score:
         )
     else:
         passed.append(f"All {s.tests_total} tests pass")
+    if s.tests_flaky:
+        deductions.append(("Tests", w.tests_flaky.points(len(s.tests_flaky)),
+                           f"{len(s.tests_flaky)} test(s) failed, then passed on a rerun "
+                           "(flaky, or made flaky by this change)"))
     if s.tests_removed:
         deductions.append(("Tests", w.tests_removed.points(len(s.tests_removed)),
                            f"{len(s.tests_removed)} test(s) were removed"))
