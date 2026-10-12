@@ -49,6 +49,7 @@ def load(cache_dir: Path, cache_key: str) -> Optional[RunResult]:
         data = json.loads(path.read_text())
         fields = {f.name for f in dataclasses.fields(RunResult)}
         result = RunResult(**{k: v for k, v in data.items() if k in fields})
+        result.from_cache = True
     except (OSError, ValueError, TypeError):
         return None
     os.utime(path)  # mark as recently used

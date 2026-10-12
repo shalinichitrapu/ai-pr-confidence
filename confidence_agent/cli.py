@@ -115,7 +115,9 @@ def main(argv=None) -> int:
                         wt, targets, contexts, runner._import_paths(wt), limit, cfg.thresholds.mutant_timeout_s,
                         failing=failing, durations=durations,
                     )
-            if label == "base" and not args.no_cache and runs["base"].tests:
+            # Only a clean base run is reused: a failure saved once (a flake, an
+            # environment problem) would excuse that test failing on every later PR.
+            if label == "base" and not args.no_cache and runs["base"].tests and not runs["base"].failed:
                 cache.save(cache_dir, base_key, runs["base"])
             gitutil.remove_worktree(repo, wt)
     finally:

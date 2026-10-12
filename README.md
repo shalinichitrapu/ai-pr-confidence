@@ -135,7 +135,10 @@ Peak-memory tracking makes tests run roughly 2–3× slower. Pass `--no-memory` 
 and reused by later runs against the same commit, keyed by the commit, `--source`,
 `--tests`, memory tracking, the Python version, installed packages and the agent's
 own version. Anything different means a fresh run. `--cache-dir` moves it and
-`--no-cache` turns it off.
+`--no-cache` turns it off. Only base runs where every test passed are saved, so a
+one-off failure can't excuse that test failing later. With cached base results,
+latency isn't compared, because the timings may come from another machine (in CI,
+an earlier job's runner); the report says so.
 
 **Installed projects and `src/` layouts.** The agent puts each checkout (and its
 `src/` folder, if there is one) first on the import path, so tests import the

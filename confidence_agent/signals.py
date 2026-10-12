@@ -46,6 +46,7 @@ class Signals:
     new_error_logs: Dict[str, int] = field(default_factory=dict)  # signature -> count
     new_span_exceptions: Dict[str, int] = field(default_factory=dict)
     latency_regressions: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    latency_skipped: str = ""  # why latency wasn't compared
     # Seen only in tests this change added. Scored at half weight, because a new
     # feature's own tests are the only place its swallowed errors can show up...
     new_test_error_logs: Dict[str, int] = field(default_factory=dict)
@@ -372,7 +373,12 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         for sig in [k for k in half if k in scored]:
             scored[sig] += half.pop(sig)
 
+    # Timings from a cached base run may come from another machine (in CI, an
+    # earlier job's runner), so they aren't comparable with this run's.
     base_lat, head_lat = _median_durations(base, in_shared), _median_durations(head, in_shared)
+    if base.from_cache:
+        s.latency_skipped = "the base results came from the cache, possibly measured on another machine"
+        head_lat = {}
     for name, after in head_lat.items():
         before = base_lat.get(name)
         if before is None:

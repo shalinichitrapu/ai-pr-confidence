@@ -72,6 +72,8 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str],
     if signals.uncovered_changes:
         details += ["**Changed lines no test executes**",
                     *[f"- `{p}` lines {_lines(l)}" for p, l in signals.uncovered_changes.items()], ""]
+    if signals.latency_skipped:
+        details += [f"**Latency not compared:** {signals.latency_skipped}. Run with `--no-cache` to compare it.", ""]
     if signals.mutation_note:
         details += [f"**Mutation testing** {signals.mutation_note}.", ""]
     if signals.mutants_survived:

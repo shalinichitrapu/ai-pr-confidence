@@ -120,7 +120,7 @@ def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, 
             pts = w.latency.points(len(s.latency_regressions))
             names = ", ".join(s.latency_regressions)
             add("latency", ("Latency", pts, f"Slower spans: {names}"))
-        else:
+        elif not s.latency_skipped:
             passed.append("No latency regressions in traced operations")
 
     # 4. Changes that hide code from the other checks
