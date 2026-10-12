@@ -79,3 +79,64 @@ def test_span_finishing_during_a_later_test_belongs_to_the_test_that_started_it(
 def test_child_span_started_later_in_a_thread_inherits_its_parents_test(spans):
     assert spans["app.parent"] == "tests/test_bg.py::test_a_starts_background_work"
     assert spans["app.child"] == "tests/test_bg.py::test_a_starts_background_work"
+
+
+WORKER_APP = '''
+import asyncio
+import logging
+
+from opentelemetry import trace
+
+tracer = trace.get_tracer("app")
+log = logging.getLogger("app")
+
+
+async def worker(queue):
+    # A long-lived consumer, like a test server or queue worker shared by many tests.
+    while True:
+        item = await queue.get()
+        with tracer.start_as_current_span("app.handle"):
+            log.error("failed to handle %s", item)
+        queue.task_done()
+'''
+
+WORKER_TESTS = '''
+import asyncio
+
+import pytest
+
+from app import worker
+
+
+@pytest.fixture(scope="module")
+def service():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)  # Python 3.9 binds the queue to the current loop
+    queue = asyncio.Queue()
+    task = loop.create_task(worker(queue))  # created during the first test's setup
+    yield loop, queue
+    task.cancel()
+    loop.run_until_complete(asyncio.sleep(0))
+    loop.close()
+
+
+def test_a_uses_service(service):
+    pass
+
+
+def test_b_triggers_error(service):
+    loop, queue = service
+    loop.run_until_complete(queue.put("x"))
+    loop.run_until_complete(queue.join())
+'''
+
+
+def test_long_lived_worker_credits_errors_to_the_test_that_caused_them(tmp_path):
+    (tmp_path / "app.py").write_text(WORKER_APP)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_worker.py").write_text(WORKER_TESTS)
+    result = run_tests(tmp_path, "head", "app", "tests", track_memory=False)
+    assert set(result.tests.values()) == {"passed"}, result.output_tail
+    culprit = "tests/test_worker.py::test_b_triggers_error"
+    assert [s["test"] for s in result.spans if s["name"] == "app.handle"] == [culprit]
+    assert [r["test"] for r in result.logs if r["message"] == "failed to handle x"] == [culprit]
