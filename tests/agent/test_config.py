@@ -215,3 +215,19 @@ def test_an_already_invalid_pyproject_doesnt_fail_an_unrelated_change():
     from confidence_agent.config import raw_table
     assert raw_table("[broken\nname = 1\n") is raw_table("[broken\nname = 2\n")
     assert raw_table("[tool.confidence]\nsource = 'a'\n") != raw_table("[broken\n")
+
+
+
+@pytest.mark.parametrize("text, message", [
+    ("[tool.confidence.bands]\nhigh = 0\nmedium = 0\n", "1 <= medium"),
+    ("[tool.confidence.thresholds]\nmetric_ratio = 0\n", "metric_ratio must be at least 1"),
+    ("[tool.confidence.thresholds]\nlatency_ratio = -1\n", "latency_ratio must be at least 1"),
+    ("[tool.confidence.thresholds]\nlarge_diff_lines = -5\n", "large_diff_lines can't be negative"),
+    ("[tool.confidence.thresholds]\nmax_mutants = 2.5\n", "max_mutants must be a whole number"),
+    ("[tool.confidence.weights]\ntests_failing = [0, 0, 0]\n", "tests_failing must take at least 41"),
+    ("[tool.confidence.weights]\nerror_logs = [30, 0, 10]\n", "can't be more than the maximum"),
+    ("[tool.confidence]\nexpected_errors = [\"\"]\n", "can't be empty"),
+])
+def test_settings_that_would_break_the_readmes_guarantees_are_rejected(text, message):
+    with pytest.raises(ConfigError, match=re.escape(message)):
+        parse(text)
