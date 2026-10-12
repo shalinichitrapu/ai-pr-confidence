@@ -22,7 +22,7 @@ else:  # pragma: no cover - exercised on Python < 3.11
 REQUIREMENTS = (
     "requirements*.txt", "*/requirements*.txt", "requirements/*.txt",
     "*-requirements*.txt", "*/*-requirements*.txt", "*_requirements*.txt",
-    "requirements*.in", "*/requirements*.in", "requirements/*.in",
+    "requirements*.in", "*/requirements*.in", "requirements/*.in", "*-requirements*.in", "*/*-requirements*.in",
     "constraints*.txt", "*/constraints*.txt",
 )
 _REQ_NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*(.*)$")
@@ -32,11 +32,25 @@ _RAW = ("-e", "--editable", "-r", "--requirement", "-c", "--constraint", "-i", "
         "--extra-index-url", "-f", "--find-links", "git+", "hg+", "svn+", "http://", "https://",
         "file:", "./", "../", "/")
 
-Deps = Dict[str, str]  # key (name, plus ";marker" if any) -> normalized spec
+Deps = Dict[Tuple[str, str], str]  # (section, key) -> normalized spec; key includes extras and marker
 
 
 def _norm(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _norm_marker(marker: str) -> str:
+    """Same marker however it's spaced, quoted or ordered: `a and b` == `b and a`."""
+    text = "".join(marker.split()).replace("'", '"')
+    if " or " in marker or "(" in text:
+        return text  # don't reorder anything that isn't a plain list of "and" clauses
+    return " and ".join(sorted(part for part in re.split(r"and", text) if part))
+
+
+def _norm_spec(spec: str) -> str:
+    """Same version spec however it's spaced or ordered: `>=1,<2` == `<2, >=1`."""
+    text = "".join(spec.split())
+    return text if text.startswith("@") else ",".join(sorted(p for p in text.split(",") if p))
 
 
 def _requirement(line: str) -> Optional[Tuple[str, str]]:
@@ -52,24 +66,26 @@ def _requirement(line: str) -> Optional[Tuple[str, str]]:
     if not m:
         return None
     spec, _, marker = m.group(3).partition(";")
-    key = _norm(m.group(1)) + (f";{''.join(marker.split())}" if marker.strip() else "")
-    return key, "".join(spec.split())
+    extras = ",".join(sorted(_norm(e) for e in (m.group(2) or "").strip("[]").split(",") if e.strip()))
+    key = _norm(m.group(1)) + (f"[{extras}]" if extras else "") + (f";{_norm_marker(marker)}" if marker.strip() else "")
+    return key, _norm_spec(spec)
 
 
-def _requirements(text: str) -> Deps:
+def _requirements(text: str, section: str = "") -> Deps:
     deps = {}
     for line in text.splitlines():
         parsed = _requirement(line)
         if parsed:
-            deps[parsed[0]] = parsed[1]
+            deps[(section, parsed[0])] = parsed[1]
     return deps
 
 
-def _poetry(table) -> Deps:
+def _poetry(table, section: str) -> Deps:
     deps = {}
     for name, spec in (table or {}).items():
         if _norm(name) != "python":
-            deps[_norm(name)] = spec if isinstance(spec, str) else repr(sorted(spec.items()) if isinstance(spec, dict) else spec)
+            value = spec if isinstance(spec, str) else repr(sorted(spec.items()) if isinstance(spec, dict) else spec)
+            deps[(section, _norm(name))] = value
     return deps
 
 
@@ -79,18 +95,17 @@ def _pyproject(text: str) -> Deps:
     except tomllib.TOMLDecodeError:
         return {}
     project = doc.get("project", {})
-    lines = list(project.get("dependencies", []))
-    for extra in project.get("optional-dependencies", {}).values():
-        lines += extra
-    for group in doc.get("dependency-groups", {}).values():  # PEP 735
-        lines += [item for item in group if isinstance(item, str)]
-    lines += doc.get("build-system", {}).get("requires", [])
-    deps = _requirements("\n".join(lines))
+    deps = _requirements("\n".join(project.get("dependencies", [])), "[project] dependencies")
+    for extra, lines in project.get("optional-dependencies", {}).items():
+        deps.update(_requirements("\n".join(lines), f"optional-dependencies.{extra}"))
+    for group, items in doc.get("dependency-groups", {}).items():  # PEP 735
+        deps.update(_requirements("\n".join(i for i in items if isinstance(i, str)), f"dependency-groups.{group}"))
+    deps.update(_requirements("\n".join(doc.get("build-system", {}).get("requires", [])), "build-system"))
     poetry = doc.get("tool", {}).get("poetry", {})
-    deps.update(_poetry(poetry.get("dependencies")))
-    deps.update(_poetry(poetry.get("dev-dependencies")))
-    for group in poetry.get("group", {}).values():
-        deps.update(_poetry(group.get("dependencies")))
+    deps.update(_poetry(poetry.get("dependencies"), "poetry"))
+    deps.update(_poetry(poetry.get("dev-dependencies"), "poetry dev"))
+    for group, table in poetry.get("group", {}).items():
+        deps.update(_poetry(table.get("dependencies"), f"poetry group {group}"))
     return deps
 
 
@@ -99,28 +114,34 @@ def is_dependency_file(path: str) -> bool:
 
 
 def _parse(path: str, text: Optional[str]) -> Deps:
-    return (_pyproject if path.endswith("pyproject.toml") else _requirements)(text or "")
+    return _pyproject(text or "") if path.endswith("pyproject.toml") else _requirements(text or "")
 
 
 def all_dependency_changes(files: Iterable[Tuple[str, Optional[str], Optional[str]]]) -> List[str]:
     """Added or changed dependencies across several files: (path, base text, head text).
 
-    Compared across all the files together, so moving a dependency from one file
-    to another isn't reported as new.
+    Each file, and each table within a pyproject.toml, is compared on its own,
+    so one can't hide a change in another. An entry that only moved (the same
+    package and spec removed from one place and added in another) isn't new.
     """
-    before: Dict[str, str] = {}
-    after: Dict[str, Tuple[str, str]] = {}
+    changes, added, removed = [], [], set()
     for path, base_text, head_text in files:
-        before.update(_parse(path, base_text))
-        after.update({k: (v, path) for k, v in _parse(path, head_text).items()})
-    changes = []
-    for key in sorted(after):
-        spec, path = after[key]
-        if key not in before:
-            changes.append(f"{path}: added {key} {spec}".rstrip())
-        elif spec != before[key]:
-            changes.append(f"{path}: {key} {before[key] or '(any)'} → {spec or '(any)'}")
-    return changes
+        before, after = _parse(path, base_text), _parse(path, head_text)
+        for (section, key), spec in before.items():
+            if (section, key) not in after:
+                removed.add((key, spec))
+        for (section, key), spec in sorted(after.items()):
+            where = f"{path} ({section})" if section else path
+            if (section, key) not in before:
+                added.append((key, spec, where))
+            elif spec != before[(section, key)]:
+                changes.append(f"{where}: {key} {before[(section, key)] or '(any)'} → {spec or '(any)'}")
+    for key, spec, where in added:
+        if (key, spec) in removed:
+            removed.discard((key, spec))  # moved, not added
+            continue
+        changes.append(f"{where}: added {key} {spec}".rstrip())
+    return sorted(changes)
 
 
 def dependency_changes(path: str, base_text: Optional[str], head_text: Optional[str]) -> List[str]:
@@ -130,8 +151,19 @@ def dependency_changes(path: str, base_text: Optional[str], head_text: Optional[
 
 # ---------------------------------------------------------------- risky code
 
-SECRET_NAME = re.compile(r"(password|passwd|secret|api_?key|token|private_?key)", re.IGNORECASE)
-NOT_A_SECRET = re.compile(r"^(https?://|/|[A-Z0-9_]+$)")  # URLs, paths, env var names
+SECRET_NAME = re.compile(r"(password|passwd|secret|api_?key|access_?key|token|private_?key)", re.IGNORECASE)
+NOT_A_SECRET = re.compile(r"^(https?://|/)")  # URLs and paths
+ENV_VAR_NAME = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$")  # APP_PASSWORD: the name of a variable, not a value
+KNOWN_SECRET = re.compile(r"^(AKIA|ASIA)[A-Z0-9]{16}$|^(sk|pk|rk)[-_]|^gh[pousr]_|^xox[abpr]-|^AIza")
+
+
+def _looks_like_secret(value: str) -> bool:
+    if KNOWN_SECRET.match(value):
+        return True
+    if NOT_A_SECRET.match(value) or ENV_VAR_NAME.match(value):
+        return False
+    # Real secrets mix letters and digits; names like "bert-base-uncased" don't.
+    return any(c.isdigit() for c in value) and any(c.isalpha() for c in value)
 
 
 def _aliases(tree: ast.AST) -> Dict[str, str]:
@@ -203,7 +235,7 @@ def _risk(node: ast.AST, aliases: Dict[str, str]) -> Optional[Tuple[str, Set[int
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         value = node.value
         if (isinstance(value, ast.Constant) and isinstance(value.value, str) and len(value.value) >= 8
-                and " " not in value.value and not NOT_A_SECRET.match(value.value)):
+                and " " not in value.value and _looks_like_secret(value.value)):
             for t in targets:
                 name = t.id if isinstance(t, ast.Name) else getattr(t, "attr", "")
                 if name and SECRET_NAME.search(name):
@@ -242,10 +274,16 @@ INFRA = (".github/*", ".gitlab-ci.yml", ".circleci/*", "Dockerfile*", "*/Dockerf
          "*.toml")
 
 
+# Data next to tests or templates is usually loaded by the tests themselves.
+EXERCISED = ("tests/*", "test/*", "*/tests/*", "*/fixtures/*", "fixtures/*", "*/templates/*", "templates/*",
+             "*/testdata/*", "testdata/*")
+
+
 def unmeasured(paths: Iterable[str]) -> List[str]:
     """Changed CI, deployment and configuration files that tests can't exercise."""
     return sorted(p for p in paths
-                  if not is_dependency_file(p) and any(fnmatch(p, pattern) for pattern in INFRA))
+                  if not is_dependency_file(p) and any(fnmatch(p, pattern) for pattern in INFRA)
+                  and not any(fnmatch(p, pattern) for pattern in EXERCISED))
 
 
 def config_only(paths: Iterable[str]) -> bool:

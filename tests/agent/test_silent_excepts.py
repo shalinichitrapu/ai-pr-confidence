@@ -102,24 +102,56 @@ def test_read_diff_keeps_the_head_source_of_changed_python_files(tmp_path):
 MOVED = "def load():\n    try:\n        return read()\n    except Exception:\n        return None\n"
 
 
+def compute_diff(**kw):
+    from confidence_agent.signals import compute
+    return compute(RunResult("b"), RunResult("h"), Diff(**kw), "tests").hidden_code
+
+
+LOGGED = "def load():\n    try:\n        return read()\n    except Exception:\n        log.exception('bad')\n        return None\n"
+
+
 def test_moved_or_reindented_handler_is_not_new():
-    from confidence_agent.signals import compute
-    d = Diff(added_lines={"pkg/other.py": {1, 2, 3, 4, 5}}, head_source={"pkg/other.py": MOVED},
-             removed_text={"pkg/util.py": MOVED.splitlines()})
-    assert compute(RunResult("b"), RunResult("h"), d, "tests").hidden_code == {}
-    # Re-indented inside a with block: same lines once stripped.
+    # Moved to another file.
+    assert compute_diff(added_lines={"pkg/other.py": {1, 2, 3, 4, 5}}, head_source={"pkg/other.py": MOVED},
+                        base_source={"pkg/util.py": MOVED}, removed_lines={"pkg/util.py": {1, 2, 3, 4, 5}}) == {}
+    # Re-indented inside a with block.
     wrapped = "def load():\n    with lock:\n        try:\n            return read()\n        except Exception:\n            return None\n"
-    d = Diff(added_lines={"pkg/util.py": {2, 3, 4, 5, 6}}, head_source={"pkg/util.py": wrapped},
-             removed_text={"pkg/util.py": ["    try:", "        return read()", "    except Exception:", "        return None"]})
-    assert compute(RunResult("b"), RunResult("h"), d, "tests").hidden_code == {}
+    assert compute_diff(added_lines={"pkg/util.py": {2, 3, 4, 5, 6}}, head_source={"pkg/util.py": wrapped},
+                        base_source={"pkg/util.py": MOVED}, removed_lines={"pkg/util.py": {2, 3, 4, 5}}) == {}
 
 
-def test_one_deletion_explains_only_one_handler():
-    from confidence_agent.signals import compute
+def test_one_removed_handler_explains_only_one_new_one():
     two = MOVED + "\n\n" + MOVED.replace("load", "load2")
-    d = Diff(added_lines={"pkg/a.py": set(range(1, 13))}, head_source={"pkg/a.py": two},
-             removed_text={"pkg/b.py": MOVED.splitlines()})
-    assert len(compute(RunResult("b"), RunResult("h"), d, "tests").hidden_code["errors silenced without a trace"]) == 1
+    found = compute_diff(added_lines={"pkg/a.py": set(range(1, 13))}, head_source={"pkg/a.py": two},
+                         base_source={"pkg/b.py": MOVED}, removed_lines={"pkg/b.py": {1, 2, 3, 4, 5}})
+    assert len(found["errors silenced without a trace"]) == 1
+
+
+def test_unrelated_deletions_dont_hide_a_new_silent_handler():
+    # 1. Re-indented while dropping its log call: it used to leave a trace, now it doesn't.
+    wrapped = "def load():\n    with lock:\n        try:\n            return read()\n        except Exception:\n            return None\n"
+    assert compute_diff(added_lines={"pkg/util.py": {2, 3, 4, 5, 6}}, head_source={"pkg/util.py": wrapped},
+                        base_source={"pkg/util.py": LOGGED}, removed_lines={"pkg/util.py": {2, 3, 4, 5, 6}})
+    # 2. A logged handler deleted in one file, a new silent one added in another.
+    assert compute_diff(added_lines={"pkg/b.py": {1, 2, 3, 4, 5}}, head_source={"pkg/b.py": MOVED},
+                        base_source={"pkg/a.py": LOGGED}, removed_lines={"pkg/a.py": {1, 2, 3, 4, 5, 6}})
+    # 3. Unrelated deleted lines that happen to read "except Exception:" and "return None".
+    other = "def f():\n    try:\n        go()\n    except Exception:\n        raise\n\ndef g():\n    return None\n"
+    assert compute_diff(added_lines={"pkg/b.py": {1, 2, 3, 4, 5}}, head_source={"pkg/b.py": MOVED},
+                        base_source={"pkg/a.py": other}, removed_lines={"pkg/a.py": {4, 5, 8}})
+
+
+def test_read_diff_records_removed_base_lines(tmp_path):
+    git(tmp_path, "init", "-q")
+    (tmp_path / "a.py").write_text("x = 1\ny = 2\nz = 3\n")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-qm", "base")
+    (tmp_path / "a.py").write_text("x = 1\nz = 3\nw = 4\n")
+    git(tmp_path, "commit", "-qam", "head")
+    diff = read_diff(tmp_path, "HEAD~1", "HEAD")
+    assert diff.removed_lines == {"a.py": {2}}
+    assert diff.base_source["a.py"] == "x = 1\ny = 2\nz = 3\n"
+    assert diff.added_lines == {"a.py": {3}}
 
 
 def test_form_feed_doesnt_shift_the_quoted_line():

@@ -196,6 +196,16 @@ def test_values_of_the_wrong_kind_are_config_errors(text):
         parse(text)
 
 
-def test_ignore_example_matches_top_level_folders():
-    cfg = parse('[tool.confidence]\nignore = ["*migrations/*"]\n')
+def test_ignore_example_matches_migrations_folders_exactly():
+    cfg = parse('[tool.confidence]\nignore = ["migrations/*", "*/migrations/*"]\n')
     assert cfg.ignored("migrations/0001.py") and cfg.ignored("app/migrations/0001.py")
+    assert not cfg.ignored("nomigrations/x.py") and not cfg.ignored("data_migrations/x.py")
+
+
+def test_inheriting_a_broken_base_table_doesnt_block_the_pull_request(tmp_path):
+    # main's table has a typo; the change only touches app.py.
+    repo = config_repo(tmp_path, "[tool.confidence]\nsorce = 'x'\n")
+    code, report = run_cli(repo, tmp_path / "out")
+    assert code == 0
+    assert "has a mistake, so defaults were used" in report
+    assert "This change's [tool.confidence] has a mistake" not in report
