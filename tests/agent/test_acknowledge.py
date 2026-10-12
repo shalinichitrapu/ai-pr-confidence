@@ -105,3 +105,23 @@ def test_self_ack_by_label_is_ignored(tmp_path, monkeypatch):
     result = run_cli(repo, tmp_path / "out", "--post-to-pr", "7")
     assert result["score"] == 95
     assert "Ignored confidence-ack:dependencies" in (tmp_path / "out" / "report.md").read_text()
+
+
+def test_acknowledging_one_kind_never_hides_another_with_the_same_name():
+    s = Signals(tests_total=5, tests_removed=["t::old"], tests_newly_failing=list("abc"), tests_failed=list("abc"))
+    r = score(s, acks={"tests-removed": "@lead"})
+    assert [d[0] for d in r.acknowledged] == ["Tests"] and r.acknowledged[0][1] == 15
+    assert r.value == 45 and r.band == "Low"  # the failing tests still count
+    assert score(s, acks={"tests": "@lead"}).value == 30  # the old display-name label matches nothing
+
+
+def test_failing_tests_and_missing_results_cant_be_acknowledged():
+    failing = Signals(tests_total=5, tests_newly_failing=["a"], tests_failed=["a"])
+    assert score(failing, acks={"tests-failing": "@lead"}).value == 55
+    assert score(Signals(tests_total=0), acks={"no-tests": "@lead"}).value == 50
+
+
+def test_report_lists_the_keys_reviewers_can_use():
+    r = score(signals())
+    md = render(r, signals(), "a" * 40, "b" * 40, None)
+    assert "`confidence-ack:metrics`, `confidence-ack:size`" in md

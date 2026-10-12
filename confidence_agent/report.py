@@ -42,6 +42,10 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str],
     for check in score.passed_checks:
         md.append(f"| ✓ | 0 | {check} |")
     md.append("")
+    ackable = [k for k in dict.fromkeys(getattr(score, "keys", [])) if k not in ("tests-failing", "no-tests")]
+    if ackable:
+        labels = ", ".join(f"`confidence-ack:{k}`" for k in ackable)
+        md += [f"<sub>If a deduction is expected, a reviewer can acknowledge it with a label: {labels}.</sub>", ""]
     for note in notes:
         md += [f"_{note}_", ""]
 

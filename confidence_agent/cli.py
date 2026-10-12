@@ -126,6 +126,9 @@ def main(argv=None) -> int:
                              f"(@{who}). Set allow_self_ack = true in [tool.confidence] to allow this.")
             else:
                 acks[signal] = f"@{who}"
+    for key in sorted(set(acks) & scoring.UNACKABLE):
+        notes.append(f"Ignored confidence-ack:{key}: newly failing tests and missing test results "
+                     "can't be acknowledged; they need fixing.")
     for note in notes:
         print(f"[confidence] {note}")
     result = scoring.score(sig, cfg, acks)

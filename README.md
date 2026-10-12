@@ -213,6 +213,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
+concurrency:
+  group: confidence-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
@@ -220,6 +224,9 @@ permissions:
 
 jobs:
   score:
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || startsWith(github.event.label.name, 'confidence-ack:')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -254,11 +261,20 @@ The agent posts a single comment and updates it on each new push. Add
 
 **Acknowledging a deduction.** When a deduction is expected (say a metric grows
 because of a wanted feature), a reviewer can add a label named
-`confidence-ack:<signal>`, e.g. `confidence-ack:metrics`. The workflow reruns on label
-changes. The deduction stays in the report, shown as "0 (−10 acknowledged by
-@reviewer)", and no longer counts toward the score or `--min-score`. Labels added by
-the pull request's own author are ignored unless `allow_self_ack = true` is set in
-`[tool.confidence]`. Locally, `--ack metrics,size` does the same.
+`confidence-ack:<key>`; the report lists the key for each deduction, e.g.
+`confidence-ack:metrics` or `confidence-ack:tests-removed`. Each kind of deduction has
+its own key, so acknowledging a removed test never hides a failing one. The workflow
+reruns when such a label is added or removed. The deduction stays in the report,
+shown as "0 (−10 acknowledged by @reviewer)", and no longer counts toward the score or
+`--min-score` until the label is removed. Newly failing tests and missing test results
+can't be acknowledged. Labels added by the pull request's own author are ignored
+unless `allow_self_ack = true` is set in `[tool.confidence]`. Locally, `--ack
+metrics,size` does the same.
+
+The workflow runs the agent from the pull request's own checkout, so for a pull
+request from a branch in your repository, its author could change the workflow or
+the agent itself. Treat the score as a review aid, not a security boundary; branch
+protection and code review still decide what merges.
 
 Pull requests from forks get a read-only token, so GitHub refuses the comment.
 The agent prints a warning instead of failing, and the report still appears on
