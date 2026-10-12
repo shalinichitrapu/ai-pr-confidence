@@ -27,25 +27,40 @@ def _find(body, classes, name) -> Optional[ast.AST]:
     return None
 
 
-def expects_exception(source: Optional[str], node_id: str) -> bool:
-    """True if the test's function uses pytest.raises or unittest's assertRaises."""
+def expected_exceptions(source: Optional[str], node_id: str) -> Optional[set]:
+    """Exception class names the test expects (pytest.raises / assertRaises), or None if it expects none.
+
+    An empty set means it expects something whose name can't be read statically.
+    """
     if not source:
-        return False
+        return None
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return False
+        return None
     _, classes, name = _split(node_id)
     func = _find(tree.body, classes, name)
     if func is None:
-        return False
+        return None
+    found = None
     for node in ast.walk(func):
         if isinstance(node, ast.Call):
             target = node.func
             called = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", None)
             if called in RAISES:
-                return True
-    return False
+                found = found if found is not None else set()
+                if node.args:
+                    first = node.args[0]
+                    for e in (first.elts if isinstance(first, ast.Tuple) else [first]):
+                        n = e.attr if isinstance(e, ast.Attribute) else getattr(e, "id", None)
+                        if n:
+                            found.add(n)
+    return found
+
+
+def expects_exception(source: Optional[str], node_id: str) -> bool:
+    """True if the test's function uses pytest.raises or unittest's assertRaises."""
+    return expected_exceptions(source, node_id) is not None
 
 
 def node_file(node_id: str) -> str:

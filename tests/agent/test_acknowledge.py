@@ -135,7 +135,9 @@ def test_keys_list_matches_scoring():
     import inspect
     import re
     from confidence_agent import scoring
-    used = set(re.findall(r'add\("([a-z-]+)"', inspect.getsource(scoring.score)))
+    source = inspect.getsource(scoring.score)
+    used = set(re.findall(r'add\("([a-z-]+)"', source))
+    used |= {k for pair in re.findall(r'runtime\("\w+", "([a-z-]+)", "([a-z-]+)"', source) for k in pair}
     assert used == scoring.KEYS
 
 

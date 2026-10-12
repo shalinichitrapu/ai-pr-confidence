@@ -179,7 +179,9 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
         (path, read_file(repo, base, diff.renamed.get(path, path)), read_file(repo, head, path))
         for path in diff.files_changed if is_dependency_file(path)
     )
-    for path in diff.removed_lines:
+    # Every changed Python file's base version (not only ones with removed lines):
+    # comparing a test's code before and after needs it even for add-only edits.
+    for path in {*diff.removed_lines, *(diff.renamed.get(p, p) for p in diff.added_lines)}:
         if path.endswith(".py"):
             text = read_file(repo, base, path)
             if text is not None:

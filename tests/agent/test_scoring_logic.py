@@ -66,10 +66,55 @@ def test_a_renamed_test_file_keeps_its_baseline():
 def test_an_existing_test_that_now_expects_an_exception_isnt_penalized():
     before = "def t1():\n    run()\n"
     after = "import pytest\n\ndef t1():\n    with pytest.raises(ValueError):\n        run()\n"
-    s = compute(run({J1: "passed"}), run({J1: "passed"}, logs=[log(T1)]),
-                Diff(head_source={"tests/test_a.py": after}, base_source={"tests/test_a.py": before}), "tests")
+    d = Diff(head_source={"tests/test_a.py": after}, base_source={"tests/test_a.py": before})
+    s = compute(run({J1: "passed"}), run({J1: "passed"}, logs=[log(T1, exc="ValueError")]), d, "tests")
     assert s.new_error_logs == {} and s.new_test_expected_errors
     assert score(s).value == 100
+    # Expecting ValueError doesn't excuse a new TimeoutError in the same test.
+    s = compute(run({J1: "passed"}), run({J1: "passed"}, logs=[log(T1, exc="TimeoutError")]), d, "tests")
+    assert s.new_error_logs
+
+
+def test_a_test_that_already_expected_an_exception_cant_excuse_new_errors():
+    src = "import pytest\n\ndef t1():\n    with pytest.raises(Exception):\n        run()\n"
+    d = Diff(head_source={"tests/test_a.py": src}, base_source={"tests/test_a.py": src})
+    s = compute(run({J1: "passed"}), run({J1: "passed"}, logs=[log(T1)]), d, "tests")
+    assert s.new_error_logs  # nothing about its expectations changed
+
+
+def test_a_flaky_tests_new_errors_still_count():
+    base = run({J1: "passed", J2: "passed"})
+    head = run({J1: "passed", J2: "failed"}, logs=[log(T2)], rerun={J2: "passed"})
+    s = compute(base, head, Diff(), "tests")
+    assert s.tests_flaky == [J2]
+    assert s.new_error_logs  # flaky costs little, so its new error log still counts
+
+
+def test_a_moved_test_that_was_skipped_isnt_newly_skipped():
+    base = run({J1: "skipped"})
+    head = RunResult("h", tests={"tests.test_z::t1": "skipped"}, node_ids=["tests/test_z.py::t1"])
+    s = compute(base, head, Diff(renamed={"tests/test_z.py": "tests/test_a.py"}), "tests")
+    assert s.tests_skipped == []
+
+
+def test_one_common_line_removed_elsewhere_doesnt_make_new_code_look_moved():
+    new = "def fetch(url):\n    check(url)\n    audit(url)\n    return self.client.get(url)\n"
+    d = Diff(added_lines={"app/new.py": {1, 2, 3, 4}}, head_source={"app/new.py": new},
+             removed_text={"app/old.py": ["    x = 1", "    return self.client.get(url)", "    y = 2", "    z = 3"]})
+    s = compute(run({J1: "passed"}), run({J1: "passed"}), d, "tests", "app")
+    assert s.changed_code_lines == 4
+
+
+def test_an_import_fallback_is_logic_not_boilerplate():
+    from confidence_agent.signals import _boilerplate_lines
+    src = '"""Doc."""\nimport os\ntry:\n    import ujson as json\nexcept ImportError:\n    import json\n'
+    assert _boilerplate_lines(src) == {1, 2}
+
+
+def test_a_comments_only_file_has_no_logic_lines():
+    from confidence_agent.signals import _statement_lines
+    assert _statement_lines("# just notes\n") == set()
+    assert _statement_lines("def broken(:\n") is None
 
 
 def test_nothing_ran_isnt_also_scored_as_tests_removed():
@@ -122,3 +167,10 @@ def test_a_function_moved_into_a_new_unimported_module_isnt_new_untested_code():
              removed_text={"app/orders.py": body})
     s = compute(run({J1: "passed"}), run({J1: "passed"}), d, "tests", "app")
     assert s.changed_code_lines == 0
+
+
+def test_errors_in_new_tests_stay_visible_when_the_maximum_is_reached():
+    r = score(Signals(tests_total=1, new_error_logs={f"s{i}": 1 for i in range(5)},
+                      new_test_error_logs={"n": 2}))
+    logs = [d for d in r.deductions if d[0] == "Logs"]
+    assert len(logs) == 1 and logs[0][1] == 25 and "plus 2 only in tests this change adds" in logs[0][2]

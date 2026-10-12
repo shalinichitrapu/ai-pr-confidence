@@ -50,11 +50,16 @@ def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, 
         keys.append(key)
         deductions.append(deduction)
 
-    # 1. Tests. A newly failing test alone takes the score below Medium (60).
+    # 1. Tests. A newly failing test, or no results at all, always scores Low:
+    # weights tune how far below, but (unless turned off with a 0 maximum) never
+    # leave it at Medium or above.
+    def always_low(tier, count: int) -> int:
+        return max(tier.points(count), 100 - cfg.bands.medium + 1) if tier.cap else 0
+
     if s.tests_total == 0:
-        add("no-tests", ("Tests", w.no_tests.points(1), "No test results: tests didn't run or couldn't be collected"))
+        add("no-tests", ("Tests", always_low(w.no_tests, 1), "No test results: tests didn't run or couldn't be collected"))
     elif s.tests_newly_failing:
-        pts = w.tests_failing.points(len(s.tests_newly_failing))
+        pts = always_low(w.tests_failing, len(s.tests_newly_failing))
         add("tests-failing", ("Tests", pts, f"{len(s.tests_newly_failing)} test(s) fail that passed before"))
     elif s.tests_failed or s.tests_flaky or s.tests_skipped_count:
         notes = []
@@ -111,29 +116,27 @@ def score(s: Signals, config: Optional[Config] = None, acks: Optional[Dict[str, 
     # what the new test checks, but they're also the only place a new feature's
     # swallowed errors show up. Full and half weight together stay within the
     # family's maximum.
-    full = w.error_logs.points(len(s.new_error_logs))
-    if s.new_error_logs:
-        total = sum(s.new_error_logs.values())
-        add("logs", ("Logs", full, f"{total} new ERROR log(s) across {len(s.new_error_logs)} signature(s), "
-                                   "a sign of errors being caught and hidden"))
-    if s.new_test_error_logs:
-        half = min(math.ceil(w.error_logs.points(len(s.new_test_error_logs)) / 2), max(0, w.error_logs.cap - full))
-        total = sum(s.new_test_error_logs.values())
-        add("logs-new-tests", ("Logs", half, f"{total} new ERROR log(s) only in tests this change adds "
-                                             "(half weight; check they're expected)"))
+    def runtime(name: str, key: str, new_key: str, tier, found: dict, in_new_tests: dict, what: str, hint: str) -> None:
+        full = tier.points(len(found))
+        half = 0
+        if in_new_tests:
+            half = min(math.ceil(tier.points(len(in_new_tests)) / 2), max(0, tier.cap - full))
+        if found:
+            note = f"{sum(found.values())} new {what} across {len(found)} signature(s){hint}"
+            if in_new_tests and not half:  # the maximum is reached; still say they're there
+                note += f"; plus {sum(in_new_tests.values())} only in tests this change adds"
+            add(key, (name, full, note))
+        if half:
+            add(new_key, (name, half, f"{sum(in_new_tests.values())} new {what} only in tests this "
+                                                 "change adds (half weight; check they're expected)"))
+
+    runtime("Logs", "logs", "logs-new-tests", w.error_logs, s.new_error_logs, s.new_test_error_logs, "ERROR log(s)",
+            ", a sign of errors being caught and hidden")
     if not s.new_error_logs and not s.new_test_error_logs:
         passed.append("No new ERROR logs")
     if s.otel_enabled:
-        full = w.span_exceptions.points(len(s.new_span_exceptions))
-        if s.new_span_exceptions:
-            total = sum(s.new_span_exceptions.values())
-            add("traces", ("Traces", full, f"{total} new exception(s) recorded on spans"))
-        if s.new_test_span_exceptions:
-            half = min(math.ceil(w.span_exceptions.points(len(s.new_test_span_exceptions)) / 2),
-                       max(0, w.span_exceptions.cap - full))
-            total = sum(s.new_test_span_exceptions.values())
-            add("traces-new-tests", ("Traces", half, f"{total} new exception(s) on spans only in tests this "
-                                                     "change adds (half weight)"))
+        runtime("Traces", "traces", "traces-new-tests", w.span_exceptions, s.new_span_exceptions, s.new_test_span_exceptions,
+                "exception(s) recorded on spans", "")
         if not s.new_span_exceptions and not s.new_test_span_exceptions:
             passed.append("No new exceptions in traces")
         if s.latency_regressions:

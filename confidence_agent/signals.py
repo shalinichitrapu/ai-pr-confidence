@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import difflib
 import re
 import statistics
 from collections import Counter
@@ -10,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
-from .expectations import expects_exception, node_file
+from .expectations import expected_exceptions, node_file
 from .gitutil import Diff
 from .review_scope import config_only, risky_code, unmeasured
 from .swallow import new_silent_excepts, removed_silent_handlers
@@ -246,20 +247,20 @@ def _log_signature(rec: Dict[str, Any]) -> str:
 
 
 def _record_signatures(records, signature, keep_record):
-    """(test, signature) for each error log (signature given) or each exception on a span (None)."""
+    """(test, signature, exception type) for each error log (signature given) or exception on a span (None)."""
     for rec in records:
         if signature is not None:
             if keep_record(rec):
-                yield rec["test"], signature(rec)
+                yield rec["test"], signature(rec), rec.get("exc_type")
             continue
         for ev in rec["events"]:
             if ev["name"] == "exception":
-                yield rec["test"], f"{rec['name']}: {ev['exc_type']}"
+                yield rec["test"], f"{rec['name']}: {ev['exc_type']}", ev["exc_type"]
 
 
 def _signatures_by_test(records, signature, keep_record) -> Dict[Optional[str], set]:
     found: Dict[Optional[str], set] = {}
-    for test, sig in _record_signatures(records, signature, keep_record):
+    for test, sig, _ in _record_signatures(records, signature, keep_record):
         found.setdefault(test, set()).add(sig)
     return found
 
@@ -280,22 +281,29 @@ def _is_docs_or_lockfile(path: str) -> bool:
 
 
 def _boilerplate_lines(source: str) -> set:
-    """Import statements and docstrings: run on import, but not logic a test should check."""
+    """Top-level imports and docstrings: run on import, but not logic a test should check.
+
+    Only module-level imports count: an import inside try/except or if (a
+    fallback) is a decision the code makes, so it stays.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return set()
     lines = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
     for node in ast.walk(tree):
         is_docstring = (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
                         and isinstance(node.value.value, str))
-        if isinstance(node, (ast.Import, ast.ImportFrom)) or is_docstring:
+        if is_docstring:
             lines.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
     return lines
 
 
-def _statement_lines(source: str) -> set:
-    """Lines that start a statement of logic in a file nothing imports.
+def _statement_lines(source: str) -> Optional[set]:
+    """Lines that start a statement of logic in a file nothing imports (None if it doesn't parse).
 
     Imports and docstrings aren't counted: a new module's boilerplate (or a module
     a function was moved into) isn't untested logic.
@@ -303,7 +311,7 @@ def _statement_lines(source: str) -> set:
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return set()
+        return None
     lines = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.stmt) or isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -314,34 +322,35 @@ def _statement_lines(source: str) -> set:
     return lines
 
 
+MOVED_BLOCK = 3  # consecutive matching lines needed to call code "moved"
+
+
 def _moved_lines(diff: Diff, tests_path: str) -> Dict[str, set]:
-    """Added lines that are the same as lines this change removed elsewhere: moved code, not new code.
+    """Added lines that are a block of code this change removed elsewhere: moved, not new.
 
-    Matched by their text without indentation, one removed line per added line.
-    Short or trivial lines (`pass`, `return None`, `else:`) aren't matched, since
-    they'd pair up by chance.
+    Only runs of at least MOVED_BLOCK consecutive non-blank lines matching
+    consecutive removed lines count (compared without indentation), so a single
+    common line (`return self.client.get(url)`) removed in one place doesn't make an
+    unrelated new copy elsewhere look moved.
     """
-    def meaningful(text: str) -> bool:
-        return len(text) >= 12 and not text.startswith("#")
-
-    removed: Dict[str, int] = {}
+    removed_runs = []
     for path, lines in diff.removed_text.items():
         if path.endswith(".py") and not _is_test_file(path, tests_path):
-            for line in lines:
-                text = line.strip()
-                if meaningful(text):
-                    removed[text] = removed.get(text, 0) + 1
+            removed_runs.append([line.strip() for line in lines if line.strip()])
     moved: Dict[str, set] = {}
     for path, numbers in diff.added_lines.items():
         source = diff.head_source.get(path)
-        if source is None or _is_test_file(path, tests_path):
+        if source is None or _is_test_file(path, tests_path) or not removed_runs:
             continue
         lines = source.split("\n")
-        for n in sorted(numbers):
-            text = lines[n - 1].strip() if n <= len(lines) else ""
-            if meaningful(text) and removed.get(text, 0) > 0:
-                removed[text] -= 1
-                moved.setdefault(path, set()).add(n)
+        added = [(n, lines[n - 1].strip()) for n in sorted(numbers) if n <= len(lines) and lines[n - 1].strip()]
+        texts = [t for _, t in added]
+        for run in removed_runs:
+            matcher = difflib.SequenceMatcher(None, run, texts, autojunk=False)
+            for block in matcher.get_matching_blocks():
+                # A short removed file (a two-line helper) moved whole counts too.
+                if block.size >= max(2, min(MOVED_BLOCK, len(run))):
+                    moved.setdefault(path, set()).update(n for n, _ in added[block.b:block.b + block.size])
     return moved
 
 
@@ -452,11 +461,6 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     s.tests_skipped_count = sum(1 for o in head.tests.values() if o == "skipped")
     # A test that passed before and is skipped (or xfailed) now hides its result as
     # surely as deleting it.
-    s.tests_skipped = sorted(t for t, o in head.tests.items() if o == "skipped" and base.tests.get(t) == "passed")
-    base_failed = set(base.failed)
-    s.tests_flaky = [t for t in head.failed if t not in base_failed and head.rerun.get(t) == "passed"]
-    s.tests_failed = [t for t in head.failed if t not in s.tests_flaky]
-    s.tests_newly_failing = [t for t in s.tests_failed if t not in base_failed]
     removed = sorted(set(base.tests) - set(head.tests))
     s.tests_added = sorted(set(head.tests) - set(base.tests))
     # A test counts as moved only when git saw its file renamed and the test kept
@@ -470,6 +474,15 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
             added.discard(new)
         else:
             s.tests_removed.append(old)
+    # Each head test's outcome before the change, following moves.
+    before = {**base.tests, **{new: base.tests[old] for old, new in s.tests_moved.items()}}
+    # A test that passed before and is skipped (or xfailed) now hides its result as
+    # surely as deleting it.
+    s.tests_skipped = sorted(t for t, o in head.tests.items() if o == "skipped" and before.get(t) == "passed")
+    base_failed = {t for t, o in before.items() if o in ("failed", "error")}
+    s.tests_flaky = [t for t in head.failed if t not in base_failed and head.rerun.get(t) == "passed"]
+    s.tests_failed = [t for t in head.failed if t not in s.tests_flaky]
+    s.tests_newly_failing = [t for t in s.tests_failed if t not in base_failed]
 
     moved = _moved_lines(diff, tests_path)
     for path, added in diff.added_lines.items():
@@ -483,8 +496,9 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         if cov is None:
             # coverage.py never saw the file: no test imported it at all. Count its
             # statements, not its comments and blank lines.
-            statements = _statement_lines(diff.head_source.get(path, ""))
-            changed = added & statements if statements else added
+            source = diff.head_source.get(path)
+            statements = _statement_lines(source) if source is not None else None
+            changed = added & statements if statements is not None else added
             s.changed_code_lines += len(changed)
             if changed:
                 s.uncovered_changes[path] = sorted(changed)
@@ -514,22 +528,33 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     for old, new in s.tests_moved.items():
         if old in base_by_junit and new in head_by_junit:
             base_of[head_by_junit[new]] = base_by_junit[old]
-    failing_now = {head_by_junit[j] for j in (*s.tests_newly_failing, *s.tests_flaky) if j in head_by_junit}
+    # Only newly failing tests: a flaky test costs little, so its runtime evidence still counts.
+    failing_now = {head_by_junit[j] for j in s.tests_newly_failing if j in head_by_junit}
 
     def comparable(test: Optional[str]) -> bool:
         return test is None or (test in base_of and test not in failing_now)
 
-    def expects(test: str, side_source: Dict[str, str], node: str) -> bool:
-        return expects_exception(side_source.get(node_file(node)), node)
-
-    # A test expects an exception if its own code says so (pytest.raises /
-    # assertRaises): newly in an existing test, or anywhere in a new one.
-    expecting = set()
+    # Errors a test expects (pytest.raises / assertRaises) are listed, not scored.
+    # A new test's errors all count as expected if it expects any exception. An
+    # existing test only gets its *newly* expected exception types exempted, so
+    # adding an unrelated pytest.raises can't hide a different new error.
+    expecting = set()  # new tests that expect an exception
+    newly_expected: Dict[str, set] = {}  # existing test -> exception types it newly expects
     for t in head.node_ids:
-        if t in failing_now or not expects(t, diff.head_source, t):
+        if t in failing_now:
             continue
-        if t not in base_of or not expects(t, diff.base_source, base_of[t]):
+        now = expected_exceptions(diff.head_source.get(node_file(t)), t)
+        if now is None:
+            continue
+        if t not in base_of:
             expecting.add(t)
+            continue
+        then = expected_exceptions(diff.base_source.get(node_file(base_of[t])), base_of[t]) or set()
+        if now - then:
+            newly_expected[t] = now - then
+
+    def is_expected(test: Optional[str], exc_type: Optional[str]) -> bool:
+        return test in expecting or (exc_type is not None and exc_type in newly_expected.get(test, ()))
 
     def in_shared(test: Optional[str]) -> bool:
         return comparable(test) and test not in expecting
@@ -543,17 +568,21 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
 
     def new_per_test(records, signature, keep_record, before, keep_test):
         found: Dict[str, int] = {}
-        for test, sig in _record_signatures(records, signature, keep_record):
+        for test, sig, exc_type in _record_signatures(records, signature, keep_record):
             if not keep_test(test):
                 continue
             seen_before = before.get(base_of.get(test, test) if test else None, set())
-            if sig not in seen_before:
+            if sig in seen_before:
+                continue
+            if is_expected(test, exc_type):
+                s.new_test_expected_errors[sig] = s.new_test_expected_errors.get(sig, 0) + 1
+            else:
                 found[sig] = found.get(sig, 0) + 1
         return found
 
     def new_anywhere(records, signature, keep_record, keep_test):
         found: Dict[str, int] = {}
-        for test, sig in _record_signatures(records, signature, keep_record):
+        for test, sig, _ in _record_signatures(records, signature, keep_record):
             if keep_test(test) and sig not in every_base_sig:
                 found[sig] = found.get(sig, 0) + 1
         return found

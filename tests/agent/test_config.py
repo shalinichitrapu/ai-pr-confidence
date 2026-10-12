@@ -219,15 +219,25 @@ def test_an_already_invalid_pyproject_doesnt_fail_an_unrelated_change():
 
 
 @pytest.mark.parametrize("text, message", [
-    ("[tool.confidence.bands]\nhigh = 0\nmedium = 0\n", "1 <= medium"),
+    ("[tool.confidence.bands]\nhigh = 50\nmedium = 101\n", "0 <= medium <= high <= 100"),
     ("[tool.confidence.thresholds]\nmetric_ratio = 0\n", "metric_ratio must be at least 1"),
     ("[tool.confidence.thresholds]\nlatency_ratio = -1\n", "latency_ratio must be at least 1"),
     ("[tool.confidence.thresholds]\nlarge_diff_lines = -5\n", "large_diff_lines can't be negative"),
     ("[tool.confidence.thresholds]\nmax_mutants = 2.5\n", "max_mutants must be a whole number"),
-    ("[tool.confidence.weights]\ntests_failing = [0, 0, 0]\n", "tests_failing must take at least 41"),
     ("[tool.confidence.weights]\nerror_logs = [30, 0, 10]\n", "can't be more than the maximum"),
     ("[tool.confidence]\nexpected_errors = [\"\"]\n", "can't be empty"),
 ])
 def test_settings_that_would_break_the_readmes_guarantees_are_rejected(text, message):
     with pytest.raises(ConfigError, match=re.escape(message)):
         parse(text)
+
+
+def test_small_test_failure_weights_still_score_low():
+    from confidence_agent.scoring import score
+    from confidence_agent.signals import Signals
+    s = Signals(tests_total=2, tests_newly_failing=["t"])
+    low = score(s, parse("[tool.confidence.weights]\ntests_failing = [10, 0, 10]\n"))
+    assert low.value == 59 and low.band == "Low"  # clamped just below medium
+    off = score(s, parse("[tool.confidence.weights]\ntests_failing = [0, 0, 0]\n"))
+    assert off.value == 100  # a 0 maximum turns the check off, as for every other weight
+    assert parse("[tool.confidence.bands]\nhigh = 0\nmedium = 0\n").bands.medium == 0

@@ -192,8 +192,8 @@ def parse(text: str) -> Config:
         _check_keys(sub, [f.name for f in fields(target)], where)
         for key, value in sub.items():
             setattr(target, key, _number(value, f"{where} {key}", kind))
-    if not 1 <= cfg.bands.medium <= cfg.bands.high <= 100:
-        raise ConfigError("[tool.confidence.bands] needs 1 <= medium <= high <= 100")
+    if not 0 <= cfg.bands.medium <= cfg.bands.high <= 100:
+        raise ConfigError("[tool.confidence.bands] needs 0 <= medium <= high <= 100")
     _check_thresholds(cfg.thresholds)
     if any(not e.strip() for e in cfg.expected_errors):
         raise ConfigError("[tool.confidence] expected_errors entries can't be empty (that would match every error)")
@@ -208,13 +208,6 @@ def parse(text: str) -> Config:
         if value[0] > value[2]:
             raise ConfigError(f"{where}: the first amount can't be more than the maximum")
         setattr(cfg.weights, key, Tier(*value))
-    # The README promises that a newly failing test, or no test results at all,
-    # always scores Low; settings can tune the amounts but not break that.
-    low_enough = 100 - cfg.bands.medium + 1
-    for key in ("tests_failing", "no_tests"):
-        if getattr(cfg.weights, key).first < low_enough:
-            raise ConfigError(f"[tool.confidence.weights] {key} must take at least {low_enough} points first, "
-                              f"so it always scores Low (below medium = {cfg.bands.medium})")
     return cfg
 
 

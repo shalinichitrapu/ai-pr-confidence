@@ -225,7 +225,9 @@ mutation = [20, 0, 20]         # proportional: the maximum is what "no edit was 
 
 The values above are the defaults. An error signature is the text after "New
 ERROR logs" or "New exceptions on spans" in a report; `expected_errors` matches
-any part of it.
+any part of it. A newly failing test, or no test results, always scores Low:
+smaller `tests_failing` or `no_tests` weights are raised to just below `medium`,
+unless their maximum is 0 (check off).
 
 **Settings are read from the tip of the base branch, not the pull request.** A pull
 request that changes `[tool.confidence]` is scored with the current settings on
