@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
-from typing import Iterable, List, Set, Tuple
+from typing import Dict, Iterable, List, Set, Tuple
 
 BROAD = {"Exception", "BaseException"}
 # Calls that leave a trace of the error: logging, tracing, error reporting.
@@ -78,21 +78,36 @@ def silent_excepts(source: str, changed_lines: Iterable[int]) -> List[int]:
     return [first for first, _ in silent_handlers(source, changed_lines)]
 
 
+def _handler_text(lines: List[str], first: int, last: int) -> Tuple[str, ...]:
+    """A handler's code with indentation and blank lines removed, for comparing moved code."""
+    return tuple(line.strip() for line in lines[first - 1:last] if line.strip())
+
+
+def removed_silent_handlers(base_sources: Dict[str, str], removed_lines: Dict[str, Iterable[int]]) -> Counter:
+    """Silent handlers this change deleted from the base code, by their code."""
+    found: Counter = Counter()
+    for path, source in base_sources.items():
+        lines = source.split("\n")
+        for first, last in silent_handlers(source, removed_lines.get(path, ())):
+            found[_handler_text(lines, first, last)] += 1
+    return found
+
+
 def new_silent_excepts(path: str, source: str, changed_lines: Iterable[int],
                        removed: Counter) -> List[str]:
     """Silent handlers on changed lines, minus ones this change only moved or re-indented.
 
-    `removed` counts the stripped lines this change deleted anywhere. A handler
-    whose lines were all deleted somewhere else is the same code, moved, and is
-    consumed from the counter so each deletion explains only one handler.
+    `removed` counts silent handlers this change deleted from the base code (see
+    removed_silent_handlers). A new handler with the same code is that handler,
+    moved; each deleted handler explains only one new one. A handler that used to
+    log and no longer does is new, even if its other lines are unchanged.
     """
     lines = source.split("\n")  # the line numbering ast uses (str.splitlines also splits on \f etc.)
     found = []
     for first, last in silent_handlers(source, changed_lines):
-        text = [line.strip() for line in lines[first - 1:last] if line.strip()]
-        need = Counter(text)
-        if all(removed[t] >= n for t, n in need.items()):
-            removed.subtract(need)
+        text = _handler_text(lines, first, last)
+        if removed[text] > 0:
+            removed[text] -= 1
             continue
         found.append(f"{path}:{first}: {lines[first - 1].strip()}")
     return found

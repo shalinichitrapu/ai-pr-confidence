@@ -94,3 +94,10 @@ def test_half_weight_errors_dont_also_show_as_passed_checks():
     head = run([OLD, NEW], logs=[error_log(NEW)], spans=[span(NEW, exc="TypeError")])
     passed = score(compute(run([OLD]), head, Diff(), "tests")).passed_checks
     assert "No new ERROR logs" not in passed and "No new exceptions in traces" not in passed
+
+
+def test_a_scored_error_isnt_also_listed_as_expected():
+    head = run([OLD, NEW], logs=[error_log(OLD), error_log(NEW)])
+    s = compute(run([OLD]), head, Diff(head_source={"tests/test_a.py": EXPECTING}), "tests")
+    assert s.new_error_logs == {"app a.py:f: bad input": 1}
+    assert s.new_test_expected_errors == {}

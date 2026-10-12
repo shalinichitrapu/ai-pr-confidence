@@ -103,3 +103,20 @@ def test_order_dependent_failure_is_not_called_flaky(tmp_path):
     assert result["signals"]["tests_flaky"] == []
     assert result["signals"]["tests_newly_failing"] == ["tests.test_m::test_b_default"]
     assert result["band"] == "Low"
+
+
+def test_every_run_disables_test_order_shuffling(tmp_path, monkeypatch):
+    import subprocess as sp
+    from confidence_agent import runner
+    commands = []
+
+    def fake(cmd, **kw):
+        commands.append(cmd)
+        return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", fake)
+    runner.run_tests(tmp_path, "head", "app", "tests", track_memory=False)
+    runner.rerun_tests(tmp_path, ["t::a"], "tests")
+    pytest_runs = [c for c in commands if "pytest" in c]
+    assert len(pytest_runs) == 2
+    for cmd in pytest_runs:
+        assert "no:randomly" in cmd and "no:random_order" in cmd
