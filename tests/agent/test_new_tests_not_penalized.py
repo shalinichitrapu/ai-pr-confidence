@@ -24,12 +24,33 @@ def span(test, name="op", ms=1.0, exc=None):
     return {"name": name, "duration_ms": ms, "status": "UNSET", "events": events, "test": test}
 
 
-def test_errors_in_a_new_test_are_listed_but_not_scored():
+def test_errors_in_a_new_test_count_at_half_weight():
     head = run([OLD, NEW], logs=[error_log(NEW)], spans=[span(NEW, exc="TypeError")])
     s = compute(run([OLD]), head, Diff(), "tests")
     assert s.new_error_logs == {} and s.new_span_exceptions == {}
     assert s.new_test_error_logs == {"app a.py:f: bad input": 1}
     assert s.new_test_span_exceptions == {"op: TypeError": 1}
+    assert score(s).value == 85  # half of -20 for logs, half of -10 for traces
+
+
+EXPECTING = """
+import pytest
+
+def test_old():
+    pass
+
+def test_new_error_path():
+    with pytest.raises(TypeError):
+        plan("bad")
+"""
+
+
+def test_errors_in_a_new_test_that_expects_an_exception_are_not_scored():
+    head = run([OLD, NEW], logs=[error_log(NEW)], spans=[span(NEW, exc="TypeError")])
+    diff = Diff(head_source={"tests/test_a.py": EXPECTING})
+    s = compute(run([OLD]), head, diff, "tests")
+    assert s.new_test_error_logs == {} and s.new_test_span_exceptions == {}
+    assert s.new_test_expected_errors == {"app a.py:f: bad input": 1, "op: TypeError": 1}
     assert score(s).value == 100
 
 
@@ -59,3 +80,24 @@ def test_test_files_dont_count_toward_diff_size():
     assert s.diff_lines == 1070
     assert s.code_diff_lines == 120
     assert all(d[0] != "Size" for d in score(s).deductions)
+
+
+def test_an_error_in_an_old_and_a_new_test_is_counted_once():
+    head = run([OLD, NEW], logs=[error_log(OLD), error_log(NEW)])
+    s = compute(run([OLD]), head, Diff(), "tests")
+    assert s.new_error_logs == {"app a.py:f: bad input": 2}
+    assert s.new_test_error_logs == {}
+    assert score(s).value == 80
+
+
+def test_half_weight_errors_dont_also_show_as_passed_checks():
+    head = run([OLD, NEW], logs=[error_log(NEW)], spans=[span(NEW, exc="TypeError")])
+    passed = score(compute(run([OLD]), head, Diff(), "tests")).passed_checks
+    assert "No new ERROR logs" not in passed and "No new exceptions in traces" not in passed
+
+
+def test_a_scored_error_isnt_also_listed_as_expected():
+    head = run([OLD, NEW], logs=[error_log(OLD), error_log(NEW)])
+    s = compute(run([OLD]), head, Diff(head_source={"tests/test_a.py": EXPECTING}), "tests")
+    assert s.new_error_logs == {"app a.py:f: bad input": 1}
+    assert s.new_test_expected_errors == {}

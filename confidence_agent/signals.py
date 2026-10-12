@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
+from .expectations import expects_exception, node_file
 from .gitutil import Diff
 from .swallow import new_silent_excepts, removed_silent_handlers
 from .runner import RunResult
@@ -37,9 +38,12 @@ class Signals:
     new_error_logs: Dict[str, int] = field(default_factory=dict)  # signature -> count
     new_span_exceptions: Dict[str, int] = field(default_factory=dict)
     latency_regressions: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    # Seen only in tests this change added. Often a new test of an error path, so not scored.
+    # Seen only in tests this change added. Scored at half weight, because a new
+    # feature's own tests are the only place its swallowed errors can show up...
     new_test_error_logs: Dict[str, int] = field(default_factory=dict)
     new_test_span_exceptions: Dict[str, int] = field(default_factory=dict)
+    # ...unless the test expects an exception (pytest.raises / assertRaises): not scored.
+    new_test_expected_errors: Dict[str, int] = field(default_factory=dict)
     # series -> {"test", "kind", "before", "after"} for the test where it grew most
     metric_regressions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     new_error_metrics: Dict[str, float] = field(default_factory=dict)  # series -> total in head
@@ -294,8 +298,14 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     def in_shared(test: Optional[str]) -> bool:
         return test is None or test in shared
 
+    expecting = {t for t in set(head.node_ids) - shared
+                 if expects_exception(diff.head_source.get(node_file(t)), t)}
+
     def in_new(test: Optional[str]) -> bool:
-        return test is not None and test not in shared
+        return test is not None and test not in shared and test not in expecting
+
+    def in_expecting(test: Optional[str]) -> bool:
+        return test in expecting
 
     base_logs = _error_log_signatures(base)
     s.new_error_logs = {k: v for k, v in _error_log_signatures(head, in_shared).items() if k not in base_logs}
@@ -307,10 +317,23 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     s.new_test_span_exceptions = {
         k: v for k, v in _span_exception_signatures(head, in_new).items() if k not in base_exc
     }
+    for found in (_error_log_signatures(head, in_expecting), _span_exception_signatures(head, in_expecting)):
+        for sig, n in found.items():
+            if sig not in base_logs and sig not in base_exc:
+                s.new_test_expected_errors[sig] = s.new_test_expected_errors.get(sig, 0) + n
 
-    for found in (s.new_error_logs, s.new_span_exceptions):
+    for found in (s.new_error_logs, s.new_span_exceptions, s.new_test_error_logs, s.new_test_span_exceptions):
         for sig in [k for k in found if cfg.expected(k)]:
             s.expected_errors[sig] = s.expected_errors.get(sig, 0) + found.pop(sig)
+    # An error already scored at full weight for an existing test isn't counted
+    # again at half weight because a new test hits it too.
+    for scored, half in ((s.new_error_logs, s.new_test_error_logs), (s.new_span_exceptions, s.new_test_span_exceptions)):
+        for sig in [k for k in half if k in scored]:
+            scored[sig] += half.pop(sig)
+    # An error that's scored somewhere isn't also listed as expected and unscored.
+    scored_anywhere = {**s.new_error_logs, **s.new_span_exceptions, **s.new_test_error_logs,
+                       **s.new_test_span_exceptions}
+    s.new_test_expected_errors = {k: v for k, v in s.new_test_expected_errors.items() if k not in scored_anywhere}
 
     base_lat, head_lat = _median_durations(base, in_shared), _median_durations(head, in_shared)
     for name, after in head_lat.items():

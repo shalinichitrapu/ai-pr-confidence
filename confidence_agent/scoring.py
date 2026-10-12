@@ -7,6 +7,7 @@ number can always be explained. The LLM never changes the score.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -62,14 +63,27 @@ def score(s: Signals, config: Optional[Config] = None) -> Score:
         pts = w.error_logs.points(len(s.new_error_logs))
         total = sum(s.new_error_logs.values())
         deductions.append(("Logs", pts, f"{total} new ERROR log(s) across {len(s.new_error_logs)} signature(s), a sign of errors being caught and hidden"))
-    else:
+    elif not s.new_test_error_logs:
         passed.append("No new ERROR logs")
+    # Errors seen only in tests this change adds: half weight. They may be what
+    # the new test checks, but they're also the only place a new feature's
+    # swallowed errors show up. Tests that expect an exception aren't counted.
+    if s.new_test_error_logs:
+        pts = math.ceil(w.error_logs.points(len(s.new_test_error_logs)) / 2)
+        total = sum(s.new_test_error_logs.values())
+        deductions.append(("Logs", pts, f"{total} new ERROR log(s) only in tests this change adds "
+                                        "(half weight; check they're expected)"))
+    if s.otel_enabled and s.new_test_span_exceptions:
+        pts = math.ceil(w.span_exceptions.points(len(s.new_test_span_exceptions)) / 2)
+        total = sum(s.new_test_span_exceptions.values())
+        deductions.append(("Traces", pts, f"{total} new exception(s) on spans only in tests this change adds "
+                                          "(half weight)"))
     if s.otel_enabled:
         if s.new_span_exceptions:
             pts = w.span_exceptions.points(len(s.new_span_exceptions))
             total = sum(s.new_span_exceptions.values())
             deductions.append(("Traces", pts, f"{total} new exception(s) recorded on spans"))
-        else:
+        elif not s.new_test_span_exceptions:
             passed.append("No new exceptions in traces")
         if s.latency_regressions:
             pts = w.latency.points(len(s.latency_regressions))
