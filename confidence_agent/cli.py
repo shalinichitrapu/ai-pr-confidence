@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -46,13 +48,30 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+# Exit codes: 0 scored (at or above --min-score), 1 below --min-score, 2 this
+# change's [tool.confidence] has a mistake, 3 the agent couldn't run (bad refs, git errors).
+COULDNT_RUN = 3
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     repo = Path(args.repo).resolve()
-    head_sha = gitutil.resolve(repo, args.head)
-    base_sha = gitutil.merge_base(repo, gitutil.resolve(repo, args.base), head_sha)
+    try:
+        head_sha = gitutil.resolve(repo, args.head)
+        base_sha = gitutil.merge_base(repo, gitutil.resolve(repo, args.base), head_sha)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip().splitlines()
+        print(f"[confidence] couldn't resolve --base {args.base!r} / --head {args.head!r} in {repo}: "
+              f"{detail[-1] if detail else exc}")
+        return COULDNT_RUN
     if base_sha == head_sha:
         print("[confidence] head has no changes relative to base; nothing to score.")
+        if args.post_to_pr:
+            # Replace any earlier score, which no longer describes this pull request.
+            from .github import post_comment
+            body = (f"{report.MARKER}\n## AI change confidence: nothing to score\n\n"
+                    f"`{head_sha[:7]}` has no changes relative to its base.")
+            print(f"[confidence] PR #{args.post_to_pr}: comment {post_comment(repo, args.post_to_pr, body)}")
         return 0
 
     print(f"[confidence] base {base_sha[:7]}  head {head_sha[:7]}")
@@ -119,13 +138,18 @@ def main(argv=None) -> int:
                         failing=failing, durations=durations, total_budget=cfg.thresholds.mutation_budget_s,
                     )
             # Only a clean base run is reused: a failure saved once (a flake, an
-            # environment problem) would excuse that test failing on every later PR.
-            if label == "base" and not args.no_cache and runs["base"].tests and not runs["base"].failed:
+            # environment problem) would excuse that test failing on every later PR,
+            # and a run that imported the user's working copy measured the wrong code.
+            base_run = runs["base"]
+            if (label == "base" and not args.no_cache and base_run.tests and not base_run.failed
+                    and base_run.exit_code == 0 and not base_run.outside_imports):
                 cache.save(cache_dir, base_key, runs["base"])
             gitutil.remove_worktree(repo, wt)
     finally:
         for label in ("base", "head"):
             gitutil.remove_worktree(repo, tmp / label)
+        shutil.rmtree(tmp, ignore_errors=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
 
     if not runs["head"].tests:
         print("[confidence] no test results from head run. pytest output:\n" + runs["head"].output_tail)

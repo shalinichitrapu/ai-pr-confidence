@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import re
 import subprocess
+import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -12,9 +14,29 @@ from typing import Dict, List, Optional, Set, Tuple
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
         # quotePath=false: print non-ASCII file names as-is instead of quoted escapes.
+        # errors="replace": a diff of a file that isn't UTF-8 mustn't crash the run.
         ["git", "-C", str(repo), "-c", "core.quotePath=false", *args],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
     ).stdout
+
+
+def _decode_source(data: bytes, path: str) -> str:
+    """Python files honour their coding declaration; anything else is UTF-8, best effort."""
+    if path.endswith(".py"):
+        try:
+            encoding = tokenize.detect_encoding(io.BytesIO(data).readline)[0]
+            return data.decode(encoding)
+        except (SyntaxError, LookupError, UnicodeDecodeError):
+            pass
+    return data.decode("utf-8", errors="replace")
+
+
+def _unquote(path: str) -> str:
+    """Undo git's C-style quoting of unusual file names ("we\"ird.py")."""
+    if len(path) >= 2 and path[0] == path[-1] == '"':
+        raw = path[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape")
+        return raw.encode("latin-1", "replace").decode("utf-8", "replace")
+    return path
 
 
 def resolve(repo: Path, ref: str) -> str:
@@ -23,10 +45,8 @@ def resolve(repo: Path, ref: str) -> str:
 
 def read_file(repo: Path, commit: str, path: str) -> Optional[str]:
     """A file's contents at a commit, or None if it doesn't exist there."""
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{commit}:{path}"], capture_output=True, text=True
-    )
-    return proc.stdout if proc.returncode == 0 else None
+    proc = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{path}"], capture_output=True)
+    return _decode_source(proc.stdout, path) if proc.returncode == 0 else None
 
 
 def merge_base(repo: Path, base: str, head: str) -> str:
@@ -103,17 +123,22 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
 
     current = old = None
     in_header = False
-    for line in git(repo, "diff", "--unified=0", "--no-color", base, head).splitlines():
+    # Fixed prefixes and no external diff tool, whatever the user's git config says
+    # (diff.noprefix, diff.external, color). Split on "\n" only: str.splitlines
+    # would also break lines at form feeds and other separators inside them.
+    patch = git(repo, "diff", "--unified=0", "--no-color", "--no-ext-diff",
+                "--src-prefix=a/", "--dst-prefix=b/", base, head)
+    for line in patch.split("\n"):
         if line.startswith("diff --git "):
             in_header, current, old = True, None, None
             continue
         # git appends a tab after file names with spaces
         if in_header and line.startswith("--- "):
-            source = line[4:].rstrip("\t")
+            source = _unquote(line[4:].rstrip("\t"))
             old = source[2:] if source.startswith("a/") else None
             continue
         if in_header and line.startswith("+++ "):
-            target = line[4:].rstrip("\t")
+            target = _unquote(line[4:].rstrip("\t"))
             current = target[2:] if target.startswith("b/") else None
             if current:
                 diff.added_lines.setdefault(current, set())

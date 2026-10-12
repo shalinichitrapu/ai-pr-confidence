@@ -147,3 +147,61 @@ def test_floats_are_mutated_and_annotations_arent():
     assert {(m.original, m.replacement) for m in mutants_for_line(src, "m.py", 2)} == {("*", "/"), ("1.5", "2.5")}
     assert {(m.original, m.replacement) for m in mutants_for_line(src, "m.py", 1)} == {("1", "2"), ("True", "False")}
     assert {m.original for m in mutants_for_line(src, "m.py", 4)} == {"2"}
+
+
+# --- git diffs and the CLI ------------------------------------------------------
+
+import subprocess  # noqa: E402
+
+from confidence_agent import cli  # noqa: E402
+from confidence_agent.gitutil import read_diff  # noqa: E402
+
+
+def git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                   check=True, capture_output=True)
+
+
+def two_commits(tmp_path, before: dict, after: dict) -> Path:
+    repo = tmp_path / "r"
+    project(repo, before)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "base")
+    git(repo, "checkout", "-qb", "change")
+    project(repo, after)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "change")
+    return repo
+
+
+def test_diff_parsing_ignores_the_users_git_config_and_odd_files(tmp_path):
+    repo = two_commits(
+        tmp_path,
+        {"pkg/legacy.py": "# -*- coding: latin-1 -*-\nNAME = 'a'\n".encode("latin-1")},
+        {"pkg/legacy.py": "# -*- coding: latin-1 -*-\nNAME = '\xe9'\n".encode("latin-1"),
+         "pkg/we\"ird.py": "x = 1\n", "pkg/ff.py": "a = 1\n\x0c\nb = 2  # after a form feed\n"},
+    )
+    git(repo, "config", "diff.noprefix", "true")
+    d = read_diff(repo, "main", "change")
+    assert d.added_lines["pkg/legacy.py"] == {2}
+    assert d.head_source["pkg/legacy.py"].endswith("NAME = '\xe9'\n")
+    assert 'pkg/we"ird.py' in d.added_lines
+    assert any("after a form feed" in line for line in d.added_text["pkg/ff.py"])
+
+
+def test_bad_refs_exit_3_not_1(tmp_path, capsys):
+    repo = two_commits(tmp_path, {}, {"pkg/b.py": "y = 2\n"})
+    assert cli.main(["--repo", str(repo), "--base", "nope", "--head", "change", "--no-llm"]) == cli.COULDNT_RUN
+    assert "couldn't resolve" in capsys.readouterr().out
+
+
+def test_temp_folders_are_cleaned_up(tmp_path, monkeypatch):
+    import tempfile
+    repo = two_commits(tmp_path, {}, {"pkg/b.py": "y = 2\n"})
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    cli.main(["--repo", str(repo), "--base", "main", "--head", "change", "--source", "pkg", "--no-llm",
+              "--no-memory", "--no-mutation", "--no-cache", "--out", str(tmp_path / "out")])
+    assert list(scratch.iterdir()) == []
