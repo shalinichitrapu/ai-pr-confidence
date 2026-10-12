@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .config import Config
 from .expectations import expects_exception, node_file
 from .gitutil import Diff
-from .review_scope import risky_code, unmeasured
+from .review_scope import config_only, risky_code, unmeasured
 from .swallow import new_silent_excepts
 from .runner import RunResult
 
@@ -281,9 +281,9 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
         for finding in risky_code(path, text, diff.added_lines.get(path, ()))
     ]
     s.unmeasured_files = unmeasured(diff.files_changed)
-    if s.unmeasured_files and not any(p.endswith(".py") for p in diff.files_changed):
+    if config_only(diff.files_changed):
         s.warnings.append(
-            "This change only touches files the tests can't exercise (configuration, data, CI or "
+            "This change only touches files the tests can't exercise (configuration, CI or "
             "infrastructure), so the score says little about it. Review those files directly."
         )
 

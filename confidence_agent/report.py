@@ -105,7 +105,7 @@ def render(score, signals, base_sha: str, head_sha: str, summary: Optional[str])
     if signals.dependency_changes:
         details += ["**Dependencies added or changed**", *[f"- `{c}`" for c in signals.dependency_changes], ""]
     if signals.unmeasured_files:
-        details += ["**Changed files the tests can't exercise** (config, data, CI; review directly)",
+        details += ["**Changed files the tests can't exercise** (configuration, CI, infrastructure; review directly)",
                     *[f"- `{p}`" for p in signals.unmeasured_files], ""]
     if signals.expected_errors:
         details += ["**Expected errors** (listed in `[tool.confidence] expected_errors`, not scored)",
