@@ -330,6 +330,10 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     for scored, half in ((s.new_error_logs, s.new_test_error_logs), (s.new_span_exceptions, s.new_test_span_exceptions)):
         for sig in [k for k in half if k in scored]:
             scored[sig] += half.pop(sig)
+    # An error that's scored somewhere isn't also listed as expected and unscored.
+    scored_anywhere = {**s.new_error_logs, **s.new_span_exceptions, **s.new_test_error_logs,
+                       **s.new_test_span_exceptions}
+    s.new_test_expected_errors = {k: v for k, v in s.new_test_expected_errors.items() if k not in scored_anywhere}
 
     base_lat, head_lat = _median_durations(base, in_shared), _median_durations(head, in_shared)
     for name, after in head_lat.items():
