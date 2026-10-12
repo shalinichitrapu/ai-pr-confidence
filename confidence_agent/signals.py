@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 import statistics
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
 from .gitutil import Diff
-from .swallow import silent_excepts
+from .swallow import new_silent_excepts
 from .runner import RunResult
 
 # Thresholds (how much slower, how much a metric or memory must grow) come from
@@ -230,11 +231,12 @@ def compute(base: RunResult, head: RunResult, diff: Diff, tests_path: str, sourc
     s = Signals(otel_enabled=head.otel_enabled)
     diff, s.ignored_files = _without_ignored(diff, cfg)
     s.hidden_code = _hidden_code(diff, tests_path)
+    removed = Counter(line.strip() for lines in diff.removed_text.values() for line in lines if line.strip())
     silenced = [
-        f"{path}:{line}: {diff.head_source[path].splitlines()[line - 1].strip()}"
-        for path, text in diff.head_source.items()
+        finding
+        for path, text in sorted(diff.head_source.items())
         if not _is_test_file(path, tests_path)
-        for line in silent_excepts(text, diff.added_lines.get(path, ()))
+        for finding in new_silent_excepts(path, text, diff.added_lines.get(path, ()), removed)
     ]
     if silenced:
         s.hidden_code["errors silenced without a trace"] = silenced
