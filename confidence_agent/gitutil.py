@@ -135,11 +135,9 @@ def read_diff(repo: Path, base: str, head: str) -> Diff:
             text = read_file(repo, head, path)
             if text is not None:
                 diff.head_source[path] = text
-    from .review_scope import dependency_changes, is_dependency_file
-    for path in diff.files_changed:
-        if is_dependency_file(path):
-            old = diff.renamed.get(path, path)
-            diff.dependency_changes += dependency_changes(
-                path, read_file(repo, base, old), read_file(repo, head, path)
-            )
+    from .review_scope import all_dependency_changes, is_dependency_file
+    diff.dependency_changes = all_dependency_changes(
+        (path, read_file(repo, base, diff.renamed.get(path, path)), read_file(repo, head, path))
+        for path in diff.files_changed if is_dependency_file(path)
+    )
     return diff
